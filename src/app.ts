@@ -15,6 +15,7 @@ import { statsRoutes } from "./modules/stats/stats.routes";
 
 export function createApp() {
   const app = express();
+  if (config.trustProxy) app.set("trust proxy", config.trustProxy);
 
   app.use(express.json({ limit: "2mb" }));
   app.use(

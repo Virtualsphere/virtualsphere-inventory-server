@@ -35,6 +35,13 @@ export const config = {
   db: dbConnection(),
   dbPoolMax: int(process.env.DB_POOL_MAX, 10),
   corsOrigin: process.env.CORS_ORIGIN ?? "*",
+  /**
+   * Express "trust proxy" setting. Set to "loopback" when running behind
+   * nginx on the same machine, so req.ip is the real client (from
+   * X-Forwarded-For) instead of 127.0.0.1 — the login throttle depends on it.
+   * Empty = don't trust any proxy (direct exposure).
+   */
+  trustProxy: process.env.TRUST_PROXY ?? "",
   /** Hard cap on how many units one intake request may create. */
   maxIntakeBatch: 5000,
 
