@@ -1,0 +1,36 @@
+{
+  "name": "stockroom-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Serial & warranty inventory ERP — Node.js + TypeScript + MySQL backend with transactional internal-serial allocation.",
+  "license": "MIT",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "migrate": "tsx src/db/migrate.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.3",
+    "mysql2": "^3.24.5",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^22.5.4",
+    "tsx": "^4.19.1",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.1"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

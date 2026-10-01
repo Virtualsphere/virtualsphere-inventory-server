@@ -1,0 +1,22 @@
+services:
+  db:
+    image: mysql:8.4
+    container_name: stockroom-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: stockroom-root
+      MYSQL_USER: stockroom
+      MYSQL_PASSWORD: stockroom
+      MYSQL_DATABASE: stockroom
+    ports:
+      - "3306:3306"
+    volumes:
+      - stockroom_mysqldata:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u stockroom -pstockroom --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  stockroom_mysqldata:
