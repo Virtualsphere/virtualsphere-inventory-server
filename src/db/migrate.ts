@@ -22,15 +22,14 @@ import { config } from "../config";
 
 const MIGRATIONS_DIR = join(__dirname, "..", "..", "migrations");
 
-/** Apply all pending migrations to `databaseUrl`. Returns the files applied. */
+/** Apply all pending migrations to the configured database. Returns the files applied. */
 export async function runMigrations(
-  databaseUrl: string = config.databaseUrl,
   log: (msg: string) => void = console.log,
 ): Promise<string[]> {
   // A dedicated connection: migration files contain several statements, which
   // the app pool deliberately does not allow (it's an injection hardening).
   const conn = await mysql.createConnection({
-    uri: databaseUrl,
+    ...config.db,
     multipleStatements: true,
     timezone: "Z",
   });

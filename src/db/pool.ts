@@ -7,7 +7,7 @@ export type { Pool, PoolConnection };
 export type Queryable = Pool | PoolConnection;
 
 export const pool: Pool = mysql.createPool({
-  uri: config.databaseUrl,
+  ...config.db,
   connectionLimit: config.dbPoolMax,
   waitForConnections: true,
   // Return SQL DATE as the raw 'YYYY-MM-DD' string instead of a JS Date.

@@ -5,30 +5,33 @@
  * This test DELETES all products and units, so it refuses to run against your
  * normal database. Point it at a throwaway database:
  *
- *   mysql -u root -p -e "CREATE DATABASE stockroom_test; GRANT ALL ON stockroom_test.* TO 'stockroom'@'%';"
- *   TEST_DATABASE_URL=mysql://stockroom:stockroom@localhost:3306/stockroom_test npm test
+ *   mysql -u root -p -e "CREATE DATABASE stockroom_test; GRANT ALL ON stockroom_test.* TO 'stockroom'@'localhost';"
+ *   then set TEST_DB_NAME=stockroom_test in .env and run `npm test`.
  *
- * TEST_DATABASE_URL may also be set in .env. Without it the test is skipped.
+ * Without TEST_DB_NAME it is skipped.
  */
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import type { Pool, RowDataPacket } from "mysql2/promise";
 
-const TEST_URL = process.env.TEST_DATABASE_URL;
+const TEST_DB = process.env.TEST_DB_NAME;
 
-// Bind the app's pool to the test database BEFORE importing anything that
-// creates it. Dynamic imports below run after this assignment.
-if (TEST_URL) process.env.DATABASE_URL = TEST_URL;
+// Point the app at the test database BEFORE importing anything that reads the
+// config: same server/user/password as the app, different database name.
+if (TEST_DB) {
+  process.env.DB_NAME = TEST_DB;
+  delete process.env.DATABASE_URL;
+}
 
-describe.skipIf(!TEST_URL)("concurrent intake serial allocation", () => {
+describe.skipIf(!TEST_DB)("concurrent intake serial allocation", () => {
   let pool: Pool;
   let intake: typeof import("../src/modules/units/unit.service").intake;
   let productId: string;
 
   beforeAll(async () => {
     const { runMigrations } = await import("../src/db/migrate");
-    await runMigrations(TEST_URL!, () => {});
+    await runMigrations(() => {});
 
     ({ pool } = await import("../src/db/pool"));
     ({ intake } = await import("../src/modules/units/unit.service"));

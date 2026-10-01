@@ -95,7 +95,7 @@ Prerequisites: Node ≥ 20, and either Docker (for the bundled MySQL) or your
 own MySQL 8.0.16+.
 
 ```bash
-# 1. MySQL (skip if you have your own — create a database + user, then set DATABASE_URL)
+# 1. MySQL (skip if you have your own — create a database + user, then set the DB_* values in .env)
 docker compose up -d
 
 # 2. install + configure
@@ -122,7 +122,7 @@ npm run build && npm start
 ```
 
 The `Dockerfile` builds the app and runs `migrate` then `start`; point it at a
-database with `DATABASE_URL`.
+database with the `DB_*` variables (or `DATABASE_URL`).
 
 ---
 
@@ -131,7 +131,13 @@ database with `DATABASE_URL`.
 | Variable       | Default                                                     | Notes                                   |
 |----------------|------------------------------------------------------------|-----------------------------------------|
 | `PORT`         | `4000`                                                      | HTTP port                               |
-| `DATABASE_URL` | `mysql://stockroom:stockroom@localhost:3306/stockroom`     | MySQL connection string                 |
+| `DB_HOST`      | `localhost`                                                 | MySQL server                            |
+| `DB_PORT`      | `3306`                                                      |                                         |
+| `DB_USER`      | `stockroom`                                                 |                                         |
+| `DB_PASSWORD`  | (empty)                                                     | any characters, no encoding needed      |
+| `DB_NAME`      | `stockroom`                                                 | database name                           |
+| `DATABASE_URL` | —                                                           | optional `mysql://user:pass@host:port/db`; **overrides** the `DB_*` values |
+| `TEST_DB_NAME` | —                                                           | throwaway database for `npm test`       |
 | `DB_POOL_MAX`  | `10`                                                        | max pooled connections                  |
 | `CORS_ORIGIN`  | `*`                                                         | comma-separated origins, or `*` for dev |
 | `JWT_SECRET`   | — (**required**)                                            | 32+ random chars; signs login tokens. Changing it signs everyone out |
@@ -322,14 +328,15 @@ against the same API whenever you like.
 ## Testing
 
 ```bash
-mysql -u root -p -e "CREATE DATABASE stockroom_test; GRANT ALL ON stockroom_test.* TO 'stockroom'@'%';"
-TEST_DATABASE_URL=mysql://stockroom:stockroom@localhost:3306/stockroom_test npm test
+mysql -u root -p -e "CREATE DATABASE stockroom_test; GRANT ALL ON stockroom_test.* TO 'stockroom'@'localhost';"
+# then in .env:  TEST_DB_NAME=stockroom_test
+npm test
 ```
 
 `test/intake.concurrency.test.ts` fires 8 intakes at one product in parallel and
 asserts the serials are unique and contiguous (`1..200`) and the counter lands
 exactly at `201` — i.e. the row lock holds. It **deletes all rows**, so it only
-runs when `TEST_DATABASE_URL` is set, and never against your normal database.
+runs when `TEST_DB_NAME` is set, and never against your normal database.
 
 ---
 

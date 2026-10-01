@@ -7,12 +7,32 @@ function int(value: string | undefined, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/** How to reach MySQL: either one URL, or the individual settings. */
+export type DbConnection =
+  | { uri: string }
+  | { host: string; port: number; user: string; password: string; database: string };
+
+/**
+ * DATABASE_URL (mysql://user:pass@host:port/db), when set, wins — handy on
+ * hosts that hand you a single URL. Otherwise the separate DB_* settings are
+ * used, which need no URL-encoding of special characters in the password.
+ */
+function dbConnection(): DbConnection {
+  const url = process.env.DATABASE_URL?.trim();
+  if (url) return { uri: url };
+  return {
+    host: process.env.DB_HOST || "localhost",
+    port: int(process.env.DB_PORT, 3306),
+    user: process.env.DB_USER || "stockroom",
+    password: process.env.DB_PASSWORD ?? "",
+    database: process.env.DB_NAME || "stockroom",
+  };
+}
+
 export const config = {
   nodeEnv: process.env.NODE_ENV ?? "development",
   port: int(process.env.PORT, 4000),
-  databaseUrl:
-    process.env.DATABASE_URL ??
-    "mysql://stockroom:stockroom@localhost:3306/stockroom",
+  db: dbConnection(),
   dbPoolMax: int(process.env.DB_POOL_MAX, 10),
   corsOrigin: process.env.CORS_ORIGIN ?? "*",
   /** Hard cap on how many units one intake request may create. */

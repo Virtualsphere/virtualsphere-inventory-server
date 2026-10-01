@@ -2,7 +2,7 @@
  * Login / registration / JWT protection, end to end over HTTP.
  *
  * DELETES all users in the target database, so — like the concurrency test —
- * it only runs when TEST_DATABASE_URL points at a throwaway database.
+ * it only runs when TEST_DB_NAME names a throwaway database.
  */
 import "dotenv/config";
 import type { AddressInfo } from "node:net";
@@ -10,14 +10,20 @@ import type { Server } from "node:http";
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
 import type { Pool } from "mysql2/promise";
 
-const TEST_URL = process.env.TEST_DATABASE_URL;
-if (TEST_URL) process.env.DATABASE_URL = TEST_URL;
+const TEST_DB = process.env.TEST_DB_NAME;
+
+// Point the app at the test database BEFORE importing anything that reads the
+// config: same server/user/password as the app, different database name.
+if (TEST_DB) {
+  process.env.DB_NAME = TEST_DB;
+  delete process.env.DATABASE_URL;
+}
 // A fixed test secret so the suite doesn't depend on .env having one.
 process.env.JWT_SECRET = "test-secret-test-secret-test-secret-0123456789";
 
 const ADMIN = { username: "root-admin", password: "admin-pass-123" };
 
-describe.skipIf(!TEST_URL)("auth", () => {
+describe.skipIf(!TEST_DB)("auth", () => {
   let pool: Pool;
   let server: Server;
   let base: string;
@@ -46,7 +52,7 @@ describe.skipIf(!TEST_URL)("auth", () => {
 
   beforeAll(async () => {
     const { runMigrations } = await import("../src/db/migrate");
-    await runMigrations(TEST_URL!, () => {});
+    await runMigrations(() => {});
     ({ pool } = await import("../src/db/pool"));
     await pool.query("DELETE FROM users");
 
