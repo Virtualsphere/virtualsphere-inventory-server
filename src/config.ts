@@ -58,11 +58,16 @@ export const config = {
 
 /** Fail fast on an unusable JWT secret (call at server startup). */
 export function assertAuthConfig(): void {
+  const howTo =
+    "(e.g. openssl rand -hex 48, or " +
+    "node -e \"console.log(require('crypto').randomBytes(48).toString('base64url'))\")";
   if (config.jwtSecret.length < 32) {
-    throw new Error(
-      "JWT_SECRET must be set to a random string of at least 32 characters " +
-        "(e.g. node -e \"console.log(require('crypto').randomBytes(48).toString('base64url'))\")",
-    );
+    throw new Error(`JWT_SECRET must be a random string of at least 32 characters ${howTo}`);
+  }
+  // Template text left in place is long enough to pass the length check but
+  // is public knowledge — anyone could forge tokens with it.
+  if (/paste|change.?me|choose|your|secret|example|placeholder/i.test(config.jwtSecret)) {
+    throw new Error(`JWT_SECRET still looks like placeholder text — replace it ${howTo}`);
   }
 }
 
