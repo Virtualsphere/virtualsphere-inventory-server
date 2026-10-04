@@ -512,7 +512,7 @@ routes.intake = async (view, params) => {
           <label class="field"><span class="lab">Intake date</span>
             <input id="i-date" type="date" value="${new Date().toISOString().slice(0, 10)}"></label>
         </div>
-        <div class="hint">Units are created with no supplier serial — you can fill them in later.</div>
+        <div class="hint">Type supplier serials in the preview below if you have them. Blank ones can be filled in later from Inventory → Details.</div>
       </div>
 
       <label class="field"><span class="lab">Notes <span class="muted">(optional, applied to all)</span></span>
@@ -536,6 +536,8 @@ routes.intake = async (view, params) => {
   const currentProduct = () => products.find((p) => p.id === sel.value);
   // Hand-edited internal serials, by row index. Unedited rows are generated.
   let overrides = {};
+  // Supplier serials typed into the preview in quantity mode, by row index.
+  const mfrInputs = {};
   const PREVIEW_MAX = 40;
 
   function updatePreview() {
@@ -568,13 +570,17 @@ routes.intake = async (view, params) => {
     }
     const shown = items.slice(0, PREVIEW_MAX);
     prev.innerHTML =
-      `<div class="hint" style="margin:0 0 6px">Internal serials are generated — click one to change it.</div>` +
+      `<div class="hint" style="margin:0 0 6px">Internal serials are generated — click one to change it.${
+        mode === "qty" ? " Type a supplier serial on the right, or leave it blank." : ""
+      }</div>` +
       shown
         .map((it, i) => {
           const edited = overrides[i] !== undefined;
-          const right = it.mfr
-            ? `<span class="seg">${esc(it.mfr)}</span>`
-            : `<span class="seg empty">no supplier serial</span>`;
+          const right =
+            mode === "qty"
+              ? `<input class="mfr-edit" data-i="${i}" maxlength="128"
+                   placeholder="no supplier serial" value="${esc(mfrInputs[i] || "")}">`
+              : `<span class="seg">${esc(it.mfr)}</span>`;
           return `<div class="preview-line"><span class="pair">
               <input class="int-edit${edited ? " edited" : ""}" data-i="${i}" maxlength="128"
                 value="${esc(edited ? overrides[i] : it.internal)}" data-gen="${esc(it.internal)}">
@@ -589,6 +595,13 @@ routes.intake = async (view, params) => {
   // Editing a preview serial records an override without re-rendering, so
   // the input keeps focus. Typing the generated value back clears it.
   prev.addEventListener("input", (e) => {
+    const mfr = e.target.closest("input.mfr-edit");
+    if (mfr) {
+      const v = mfr.value.trim();
+      if (v) mfrInputs[mfr.dataset.i] = v;
+      else delete mfrInputs[mfr.dataset.i];
+      return;
+    }
     const inp = e.target.closest("input.int-edit");
     if (!inp) return;
     const v = inp.value.trim();
@@ -646,8 +659,14 @@ routes.intake = async (view, params) => {
       }
       body.quantity = qty;
       body.intakeDate = $("#i-date", view).value || undefined;
+      const typed = Object.keys(mfrInputs).map(Number).filter((i) => i < qty);
+      if (typed.length) {
+        body.manufacturerSerials = Array.from({ length: Math.max(...typed) + 1 }, (_, i) =>
+          mfrInputs[i] ?? null,
+        );
+      }
     }
-    const count = body.manufacturerSerials ? body.manufacturerSerials.length : body.quantity;
+    const count = body.quantity ?? body.manufacturerSerials.length;
     const edited = Object.keys(overrides).map(Number).filter((i) => i < count);
     if (edited.length) {
       body.internalSerials = Array.from({ length: Math.max(...edited) + 1 }, (_, i) =>

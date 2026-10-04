@@ -72,8 +72,8 @@ export interface IntakeResult {
  * UNIQUE (internal_serial) indexes are the belt-and-braces backstop).
  */
 export async function intake(input: IntakeInput): Promise<IntakeResult> {
-  const serials = input.manufacturerSerials;
-  const count = serials ? serials.length : input.quantity!;
+  const serials = input.manufacturerSerials ?? [];
+  const count = input.quantity ?? serials.length;
   const intakeDate = input.intakeDate ?? todayISO();
 
   return withTransaction(async (conn) => {
@@ -128,7 +128,7 @@ export async function intake(input: IntakeInput): Promise<IntakeResult> {
         productId: product.id,
         seq: seq++,
         internalSerial,
-        manufacturerSerial: serials ? serials[i]!.trim() : null,
+        manufacturerSerial: serials[i] ?? null,
         intakeDate,
         warrantyStart: intakeDate,
         warrantyMonths: product.warranty_months,

@@ -15,29 +15,30 @@ export const unitStatusSchema = z.enum([
 
 const manufacturerSerial = z.string().trim().min(1).max(128);
 const internalSerial = z.string().trim().min(1).max(128);
+/** A per-unit serial in a batch: null or "" means "none / generate". */
+const optionalSerial = z
+  .string()
+  .trim()
+  .max(128)
+  .nullable()
+  .transform((s) => (s ? s : null));
 
 /**
- * Intake: add units to a product. Two mutually exclusive modes —
- *  - `manufacturerSerials`: one supplier serial per unit (count = array length)
- *  - `quantity`: N units whose supplier serial is unknown at intake
+ * Intake: add units to a product. Two modes —
+ *  - `manufacturerSerials` only: one supplier serial per unit (count = array
+ *    length); every entry must be present
+ *  - `quantity`: N units. `manufacturerSerials` may also be sent, then it
+ *    gives supplier serials for the first units; null/"" entries (and units
+ *    past the end of the array) get no supplier serial
  * Optional `internalSerials` overrides the generated internal serial per unit
- * (same order/length as the units; null or "" keeps the generated one).
+ * (same order as the units; null or "" keeps the generated one).
  */
 export const intakeSchema = z
   .object({
     productId: z.string().uuid(),
-    manufacturerSerials: z.array(manufacturerSerial).optional(),
+    manufacturerSerials: z.array(optionalSerial).optional(),
     quantity: z.number().int().min(1).max(config.maxIntakeBatch).optional(),
-    internalSerials: z
-      .array(
-        z
-          .string()
-          .trim()
-          .max(128)
-          .nullable()
-          .transform((s) => (s ? s : null)),
-      )
-      .optional(),
+    internalSerials: z.array(optionalSerial).optional(),
     intakeDate: isoDate.optional(),
     notes: z.string().trim().max(2000).optional().default(""),
   })
@@ -47,27 +48,37 @@ export const intakeSchema = z
       val.manufacturerSerials.length > 0;
     const hasQty = typeof val.quantity === "number";
 
-    if (hasSerials === hasQty) {
+    if (!hasSerials && !hasQty) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message:
-          "Provide either a non-empty manufacturerSerials array or a quantity, but not both",
+        message: "Provide a non-empty manufacturerSerials array or a quantity",
       });
       return;
     }
 
     if (hasSerials) {
       const serials = val.manufacturerSerials!;
-      if (serials.length > config.maxIntakeBatch) {
+      const max = hasQty ? val.quantity! : config.maxIntakeBatch;
+      if (serials.length > max) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["manufacturerSerials"],
-          message: `At most ${config.maxIntakeBatch} serials per intake`,
+          message: hasQty
+            ? "More manufacturer serials than the quantity"
+            : `At most ${config.maxIntakeBatch} serials per intake`,
+        });
+      }
+      if (!hasQty && serials.some((s) => !s)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["manufacturerSerials"],
+          message: "Serials cannot be empty (use quantity for units without one)",
         });
       }
       // Reject duplicates within the batch (case-insensitive).
       const seen = new Set<string>();
       for (const s of serials) {
+        if (!s) continue;
         const key = s.toLowerCase();
         if (seen.has(key)) {
           ctx.addIssue({
@@ -82,7 +93,7 @@ export const intakeSchema = z
     }
 
     if (val.internalSerials) {
-      const count = hasSerials ? val.manufacturerSerials!.length : val.quantity!;
+      const count = hasQty ? val.quantity! : val.manufacturerSerials!.length;
       if (val.internalSerials.length > count) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,

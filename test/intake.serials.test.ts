@@ -76,6 +76,17 @@ describe.skipIf(!TEST_DB)("editable serials", () => {
     expect(updated.manufacturerSerial).toBe("SNA-9");
   });
 
+  it("takes supplier serials for some units in quantity mode", async () => {
+    const r = await intake({ quantity: 3, manufacturerSerials: ["SNA-1", null] });
+    expect(r.units.map((u) => u.manufacturerSerial)).toEqual(["SNA-1", null, null]);
+  });
+
+  it("rejects more supplier serials than the quantity", () => {
+    expect(() =>
+      schema.intakeSchema.parse({ productId, quantity: 1, manufacturerSerials: ["A", "B"] }),
+    ).toThrow(/More manufacturer serials than the quantity/);
+  });
+
   it("rejects an internal serial that is already in use", async () => {
     await expect(
       intake({ quantity: 1, internalSerials: ["CUSTOM-1"] }),
