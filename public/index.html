@@ -166,6 +166,9 @@
 
   .preview-line{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px dashed var(--line)}
   .preview-line:last-child{border-bottom:none}
+  /* Editable internal serial in the intake preview */
+  .preview-line input.int-edit{width:220px;max-width:100%;padding:3px 8px;font-family:var(--mono);font-size:12.5px;background:var(--accent-soft);border-color:#D4DBF6;color:var(--accent-ink)}
+  .preview-line input.int-edit.edited{border-color:var(--accent)}
   .banner{display:flex;gap:10px;align-items:center;padding:10px 14px;border-radius:var(--r-sm);font-size:13px;margin-bottom:16px}
   .banner.err{background:var(--err-bg);color:var(--err-ink)}
   .banner.info{background:var(--accent-soft);color:var(--accent-ink)}

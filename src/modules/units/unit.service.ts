@@ -10,6 +10,7 @@ import type { Settings, Unit, UnitView } from "../../types";
 import { getSettings } from "../settings/settings.repo";
 import {
   bulkInsertUnits,
+  findExistingInternalSerials,
   findUnitById,
   type InsertableUnit,
   listUnits,
@@ -36,6 +37,23 @@ interface LockedProductRow extends RowDataPacket {
   warranty_months: number;
   serial_prefix: string | null;
   next_seq: number;
+}
+
+/**
+ * Map a duplicate-key error on units to a 409. The internal-serial key gets
+ * its own message naming the serial; anything else uses `fallback`.
+ */
+function duplicateSerialConflict(err: unknown, fallback: string) {
+  const msg = (err as { sqlMessage?: string }).sqlMessage ?? "";
+  if (msg.includes("units_internal_serial_key")) {
+    const value = /Duplicate entry '(.*)' for key/.exec(msg)?.[1];
+    return conflict(
+      value
+        ? `Internal serial "${value}" is already in use`
+        : "That internal serial is already in use",
+    );
+  }
+  return conflict(fallback, msg || undefined);
 }
 
 export interface IntakeResult {
@@ -72,15 +90,44 @@ export async function intake(input: IntakeInput): Promise<IntakeResult> {
     const settings: Settings = await getSettings(conn);
     const prefix = product.serial_prefix ?? settings.serialPrefix ?? "";
     const code = productCode(product.sku, product.name);
-    const startSeq = product.next_seq;
+    const overrides = input.internalSerials ?? [];
+
+    // Generated serials must not collide with this batch's overrides, nor with
+    // an existing unit that was renamed by hand to a would-be generated serial.
+    // Such seqs are skipped. Existing serials are fetched lazily, a window at
+    // a time, since collisions are rare.
+    const reserved = new Set(
+      overrides.filter((s): s is string => !!s).map((s) => s.toLowerCase()),
+    );
+    const existing = new Set<string>();
+    const window = count + 16;
+    let fetchedUpTo = product.next_seq;
+    let seq = product.next_seq;
+
+    const nextGenerated = async (): Promise<string> => {
+      for (;;) {
+        if (seq >= fetchedUpTo) {
+          const candidates = Array.from({ length: window }, (_, k) =>
+            formatSerial(prefix, code, fetchedUpTo + k),
+          );
+          for (const s of await findExistingInternalSerials(conn, candidates))
+            existing.add(s.toLowerCase());
+          fetchedUpTo += window;
+        }
+        const candidate = formatSerial(prefix, code, seq);
+        const key = candidate.toLowerCase();
+        if (!existing.has(key) && !reserved.has(key)) return candidate;
+        seq++;
+      }
+    };
 
     const toInsert: InsertableUnit[] = [];
     for (let i = 0; i < count; i++) {
-      const seq = startSeq + i;
+      const internalSerial = overrides[i] ?? (await nextGenerated());
       toInsert.push({
         productId: product.id,
-        seq,
-        internalSerial: formatSerial(prefix, code, seq),
+        seq: seq++,
+        internalSerial,
         manufacturerSerial: serials ? serials[i]!.trim() : null,
         intakeDate,
         warrantyStart: intakeDate,
@@ -94,17 +141,17 @@ export async function intake(input: IntakeInput): Promise<IntakeResult> {
       inserted = await bulkInsertUnits(conn, toInsert);
     } catch (err) {
       if (isUnique(err)) {
-        throw conflict(
+        throw duplicateSerialConflict(
+          err,
           "One or more manufacturer serials already exist for this product",
-          (err as { sqlMessage?: string }).sqlMessage,
         );
       }
       throw err;
     }
 
     await conn.query(
-      "UPDATE products SET next_seq = next_seq + ?, updated_at = NOW(3) WHERE id = ?",
-      [count, product.id],
+      "UPDATE products SET next_seq = ?, updated_at = NOW(3) WHERE id = ?",
+      [seq, product.id],
     );
 
     const units: UnitView[] = inserted.map((u) => ({
@@ -146,6 +193,8 @@ export async function updateUnit(
 
   const columns: Record<string, unknown> = {};
   if (patch.status !== undefined) columns["status"] = patch.status;
+  if (patch.internalSerial !== undefined)
+    columns["internal_serial"] = patch.internalSerial;
   if (patch.manufacturerSerial !== undefined)
     columns["manufacturer_serial"] = patch.manufacturerSerial;
   if (patch.soldTo !== undefined) columns["sold_to"] = patch.soldTo;
@@ -170,7 +219,8 @@ export async function updateUnit(
     if (!ok) throw notFound("Unit");
   } catch (err) {
     if (isUnique(err)) {
-      throw conflict(
+      throw duplicateSerialConflict(
+        err,
         "That manufacturer serial already exists for this product",
       );
     }

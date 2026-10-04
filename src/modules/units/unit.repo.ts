@@ -112,6 +112,19 @@ export async function bulkInsertUnits(
   return rows.map(mapUnit);
 }
 
+/** Which of `serials` are already used as an internal serial (any product). */
+export async function findExistingInternalSerials(
+  conn: PoolConnection,
+  serials: string[],
+): Promise<string[]> {
+  if (serials.length === 0) return [];
+  const [rows] = await conn.query<RowDataPacket[]>(
+    "SELECT internal_serial FROM units WHERE internal_serial IN (?)",
+    [serials],
+  );
+  return rows.map((r) => String(r["internal_serial"]));
+}
+
 interface UnitFilters {
   q?: string;
   productId?: string;

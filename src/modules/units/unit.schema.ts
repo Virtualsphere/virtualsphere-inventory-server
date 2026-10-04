@@ -14,17 +14,30 @@ export const unitStatusSchema = z.enum([
 ]);
 
 const manufacturerSerial = z.string().trim().min(1).max(128);
+const internalSerial = z.string().trim().min(1).max(128);
 
 /**
  * Intake: add units to a product. Two mutually exclusive modes —
  *  - `manufacturerSerials`: one supplier serial per unit (count = array length)
  *  - `quantity`: N units whose supplier serial is unknown at intake
+ * Optional `internalSerials` overrides the generated internal serial per unit
+ * (same order/length as the units; null or "" keeps the generated one).
  */
 export const intakeSchema = z
   .object({
     productId: z.string().uuid(),
     manufacturerSerials: z.array(manufacturerSerial).optional(),
     quantity: z.number().int().min(1).max(config.maxIntakeBatch).optional(),
+    internalSerials: z
+      .array(
+        z
+          .string()
+          .trim()
+          .max(128)
+          .nullable()
+          .transform((s) => (s ? s : null)),
+      )
+      .optional(),
     intakeDate: isoDate.optional(),
     notes: z.string().trim().max(2000).optional().default(""),
   })
@@ -67,12 +80,38 @@ export const intakeSchema = z
         seen.add(key);
       }
     }
+
+    if (val.internalSerials) {
+      const count = hasSerials ? val.manufacturerSerials!.length : val.quantity!;
+      if (val.internalSerials.length > count) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["internalSerials"],
+          message: "More internal serials than units",
+        });
+      }
+      const seen = new Set<string>();
+      for (const s of val.internalSerials) {
+        if (!s) continue;
+        const key = s.toLowerCase();
+        if (seen.has(key)) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: ["internalSerials"],
+            message: `Duplicate internal serial in batch: "${s}"`,
+          });
+          break;
+        }
+        seen.add(key);
+      }
+    }
   });
 
 /** PATCH a single unit. All fields optional; at least one required. */
 export const updateUnitSchema = z
   .object({
     status: unitStatusSchema,
+    internalSerial,
     manufacturerSerial: manufacturerSerial.nullable(),
     soldTo: z.string().trim().max(200).nullable(),
     soldDate: isoDate.nullable(),

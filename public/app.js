@@ -534,6 +534,9 @@ routes.intake = async (view, params) => {
   const countEl = $("#i-count", view);
 
   const currentProduct = () => products.find((p) => p.id === sel.value);
+  // Hand-edited internal serials, by row index. Unedited rows are generated.
+  let overrides = {};
+  const PREVIEW_MAX = 40;
 
   function updatePreview() {
     const p = currentProduct();
@@ -563,18 +566,41 @@ routes.intake = async (view, params) => {
       prev.innerHTML = `<div class="muted">Enter serials or a quantity to preview the mapping.</div>`;
       return;
     }
-    const shown = items.slice(0, 40);
+    const shown = items.slice(0, PREVIEW_MAX);
     prev.innerHTML =
+      `<div class="hint" style="margin:0 0 6px">Internal serials are generated — click one to change it.</div>` +
       shown
-        .map(
-          (it) =>
-            `<div class="preview-line">${serialPair(it.internal, it.mfr)}</div>`,
-        )
+        .map((it, i) => {
+          const edited = overrides[i] !== undefined;
+          const right = it.mfr
+            ? `<span class="seg">${esc(it.mfr)}</span>`
+            : `<span class="seg empty">no supplier serial</span>`;
+          return `<div class="preview-line"><span class="pair">
+              <input class="int-edit${edited ? " edited" : ""}" data-i="${i}" maxlength="128"
+                value="${esc(edited ? overrides[i] : it.internal)}" data-gen="${esc(it.internal)}">
+              <span class="arrow">←</span>${right}</span></div>`;
+        })
         .join("") +
       (items.length > shown.length
-        ? `<div class="muted" style="margin-top:8px">+ ${items.length - shown.length} more…</div>`
+        ? `<div class="muted" style="margin-top:8px">+ ${items.length - shown.length} more (auto-generated)…</div>`
         : "");
   }
+
+  // Editing a preview serial records an override without re-rendering, so
+  // the input keeps focus. Typing the generated value back clears it.
+  prev.addEventListener("input", (e) => {
+    const inp = e.target.closest("input.int-edit");
+    if (!inp) return;
+    const v = inp.value.trim();
+    if (v && v !== inp.dataset.gen) overrides[inp.dataset.i] = v;
+    else delete overrides[inp.dataset.i];
+    inp.classList.toggle("edited", overrides[inp.dataset.i] !== undefined);
+  });
+  // Leaving a field blank restores the generated serial.
+  prev.addEventListener("focusout", (e) => {
+    const inp = e.target.closest("input.int-edit");
+    if (inp && !inp.value.trim()) inp.value = inp.dataset.gen;
+  });
 
   $("#i-mode", view)
     .querySelectorAll("button")
@@ -589,7 +615,10 @@ routes.intake = async (view, params) => {
         updatePreview();
       }),
     );
-  sel.addEventListener("change", updatePreview);
+  sel.addEventListener("change", () => {
+    overrides = {}; // a different product means different generated serials
+    updatePreview();
+  });
   $("#i-serials", view).addEventListener("input", updatePreview);
   $("#i-qty", view).addEventListener("input", updatePreview);
   updatePreview();
@@ -617,6 +646,13 @@ routes.intake = async (view, params) => {
       }
       body.quantity = qty;
       body.intakeDate = $("#i-date", view).value || undefined;
+    }
+    const count = body.manufacturerSerials ? body.manufacturerSerials.length : body.quantity;
+    const edited = Object.keys(overrides).map(Number).filter((i) => i < count);
+    if (edited.length) {
+      body.internalSerials = Array.from({ length: Math.max(...edited) + 1 }, (_, i) =>
+        overrides[i] ?? null,
+      );
     }
     const btn = $("#i-submit", view);
     btn.disabled = true;
@@ -793,18 +829,24 @@ routes.inventory = async (view, params) => {
   view.querySelectorAll("[data-unit]").forEach((b) =>
     b.addEventListener("click", () => {
       const u = data.items.find((x) => x.id === b.dataset.unit);
-      unitModal(u);
+      unitModal(u, render);
     }),
   );
 };
 
-function unitModal(u) {
+function unitModal(u, onSaved) {
   const w = computeWarranty(u.warrantyStart, u.intakeDate, u.warrantyMonths);
   const barClass = w.expired ? "err" : w.daysRemaining < 45 ? "warn" : "";
   openModal({
     title: "Unit detail",
     body: `
-      <div style="margin-bottom:14px">${serialPair(u.internalSerial, u.manufacturerSerial)}</div>
+      <div class="row">
+        <label class="field"><span class="lab">Internal serial</span>
+          <input id="u-int" class="mono" maxlength="128" value="${esc(u.internalSerial)}"></label>
+        <label class="field"><span class="lab">Supplier serial</span>
+          <input id="u-mfr" class="mono" maxlength="128" value="${esc(u.manufacturerSerial || "")}"
+            placeholder="none — type to add"></label>
+      </div>
       <div class="cert-grid" style="border-radius:10px;border:1px solid var(--line);margin-bottom:16px">
         <div class="c"><div class="k">Product</div><div class="v">${esc(u.productName)}</div></div>
         <div class="c"><div class="k">SKU</div><div class="v mono">${esc(u.sku)}</div></div>
@@ -815,10 +857,40 @@ function unitModal(u) {
       </div>
       <div class="bar ${barClass}"><i style="width:${w.percentElapsed}%"></i></div>
       ${u.soldTo ? `<div class="hint">Sold to ${esc(u.soldTo)}${u.soldDate ? " on " + esc(u.soldDate) : ""}</div>` : ""}
-      ${u.notes ? `<div class="hint">Notes: ${esc(u.notes)}</div>` : ""}`,
-    footer: `<button class="btn" data-cancel>Close</button>`,
-    onMount: (root, close) =>
-      $("[data-cancel]", root).addEventListener("click", close),
+      <label class="field" style="margin-top:14px"><span class="lab">Notes</span>
+        <input id="u-notes" maxlength="2000" value="${esc(u.notes)}"></label>
+      <div class="hint" id="u-err" style="color:var(--err-ink)"></div>`,
+    footer: `<button class="btn" data-cancel>Close</button>
+             <button class="btn primary" data-save>Save</button>`,
+    onMount: (root, close) => {
+      $("[data-cancel]", root).addEventListener("click", close);
+      $("[data-save]", root).addEventListener("click", async (e) => {
+        const errEl = $("#u-err", root);
+        errEl.textContent = "";
+        const internal = $("#u-int", root).value.trim();
+        const mfr = $("#u-mfr", root).value.trim() || null;
+        const notes = $("#u-notes", root).value.trim();
+        if (!internal) {
+          errEl.textContent = "Internal serial can't be empty.";
+          return;
+        }
+        const patch = {};
+        if (internal !== u.internalSerial) patch.internalSerial = internal;
+        if (mfr !== (u.manufacturerSerial || null)) patch.manufacturerSerial = mfr;
+        if (notes !== u.notes) patch.notes = notes;
+        if (!Object.keys(patch).length) return close();
+        e.target.disabled = true;
+        try {
+          await api("/units/" + u.id, { method: "PATCH", body: JSON.stringify(patch) });
+          toast("Unit updated", "ok");
+          close();
+          if (onSaved) onSaved();
+        } catch (ex) {
+          errEl.textContent = ex.message;
+          e.target.disabled = false;
+        }
+      });
+    },
   });
 }
 
