@@ -75,21 +75,6 @@ export const intakeSchema = z
           message: "Serials cannot be empty (use quantity for units without one)",
         });
       }
-      // Reject duplicates within the batch (case-insensitive).
-      const seen = new Set<string>();
-      for (const s of serials) {
-        if (!s) continue;
-        const key = s.toLowerCase();
-        if (seen.has(key)) {
-          ctx.addIssue({
-            code: z.ZodIssueCode.custom,
-            path: ["manufacturerSerials"],
-            message: `Duplicate serial in batch: "${s}"`,
-          });
-          break;
-        }
-        seen.add(key);
-      }
     }
 
     if (val.internalSerials) {

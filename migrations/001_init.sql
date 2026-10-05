@@ -77,11 +77,9 @@ CREATE TABLE IF NOT EXISTS units (
     -- guarantee against duplicate serials even under concurrent intake.
     UNIQUE KEY units_seq_per_product_key (product_id, seq),
 
-    -- A manufacturer serial must be unique within a product when present.
-    -- (MySQL UNIQUE indexes allow any number of NULLs, so unknown serials are
-    -- fine.) It is scoped to the product because two different manufacturers
-    -- can legitimately reuse the same serial string across product lines.
-    UNIQUE KEY units_mfr_serial_per_product_key (product_id, manufacturer_serial),
+    -- Manufacturer serials are NOT unique.
+    -- Multiple physical units may have the same manufacturer serial.
+    KEY units_mfr_serial_idx (manufacturer_serial),
 
     -- Lookup / filter support. (product_id is covered by the keys above.)
     KEY units_status_idx (status),
