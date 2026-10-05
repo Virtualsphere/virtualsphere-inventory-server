@@ -933,7 +933,12 @@ routes.warranty = async (view, params) => {
     const serial = input.value.trim();
     if (!serial) return;
     result.innerHTML = `<div class="muted" style="padding:10px">Searching…</div>`;
-    const res = await fetch("/api/warranty?serial=" + encodeURIComponent(serial));
+    const res = await fetch(
+      "/api/warranty?serial=" + encodeURIComponent(serial),
+      {
+        headers: authHeaders(),
+      }
+    );
     const data = await res.json();
     if (data.found) {
       const w = data.warranty;
