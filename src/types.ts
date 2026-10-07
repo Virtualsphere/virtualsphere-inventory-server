@@ -37,6 +37,7 @@ export interface Unit {
   warrantyMonths: number;
   soldTo: string | null;
   soldDate: string | null;
+  dispatchId: string | null;
   notes: string;
   createdAt: string;
   updatedAt: string;
@@ -46,6 +47,30 @@ export interface Unit {
 export interface UnitView extends Unit {
   productName: string;
   sku: string;
+}
+
+/** Stock given out to a customer (one product per record). */
+export interface Dispatch {
+  id: string;
+  invoiceNo: string;
+  customerName: string;
+  customerPhone: string;
+  gstNo: string | null;
+  productId: string;
+  productName: string;
+  sku: string;
+  quantity: number;
+  givenDate: string;
+  validUntil: string | null;
+  notes: string;
+  createdBy: string | null;
+  createdByName: string | null;
+  createdAt: string;
+}
+
+/** A dispatch plus the units that went out with it. */
+export interface DispatchDetail extends Dispatch {
+  units: UnitView[];
 }
 
 export interface Settings {

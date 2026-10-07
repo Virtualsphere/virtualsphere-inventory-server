@@ -170,6 +170,13 @@
   .preview-line input.int-edit{width:220px;max-width:100%;padding:3px 8px;font-family:var(--mono);font-size:12.5px;background:var(--accent-soft);border-color:#D4DBF6;color:var(--accent-ink)}
   .preview-line input.int-edit.edited{border-color:var(--accent)}
   .preview-line input.mfr-edit{width:220px;max-width:100%;padding:3px 8px;font-family:var(--mono);font-size:12.5px;background:var(--inset)}
+  /* Unit picker on the Give stock page */
+  .pick-list{max-height:340px;overflow:auto;border:1px solid var(--line);border-radius:var(--r-sm);background:var(--panel)}
+  .pick-row{display:flex;align-items:center;gap:10px;padding:7px 12px;border-bottom:1px solid var(--line);cursor:pointer}
+  .pick-row:last-child{border-bottom:none}
+  .pick-row:hover{background:var(--panel-2)}
+  .pick-row input{width:auto;margin:0}
+  .pick-row .d{margin-left:auto;font-size:12px}
   .banner{display:flex;gap:10px;align-items:center;padding:10px 14px;border-radius:var(--r-sm);font-size:13px;margin-bottom:16px}
   .banner.err{background:var(--err-bg);color:var(--err-ink)}
   .banner.info{background:var(--accent-soft);color:var(--accent-ink)}
@@ -239,6 +246,8 @@
         <a data-route="dashboard"><span class="i">◧</span> Dashboard</a>
         <a data-route="products"><span class="i">▤</span> Products</a>
         <a data-route="intake"><span class="i">＋</span> Add stock</a>
+        <a data-route="give"><span class="i">－</span> Give stock</a>
+        <a data-route="dispatches"><span class="i">⇥</span> Stock given</a>
         <a data-route="inventory"><span class="i">▦</span> Inventory</a>
         <a data-route="warranty"><span class="i">◎</span> Warranty lookup</a>
         <a data-route="users" data-admin hidden><span class="i">◉</span> Users</a>
@@ -275,6 +284,6 @@
 
   <div id="toast"></div>
   <div id="modal-root"></div>
-  <script src="/app.js"></script>
+  <script src="/app.js?v=2"></script>
 </body>
 </html>

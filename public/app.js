@@ -692,6 +692,394 @@ routes.intake = async (view, params) => {
   });
 };
 
+// ----------------------------------------------------------------- give stock
+/** 'YYYY-MM-DD' plus whole months, the same way warranty end dates are computed. */
+function addMonths(dateStr, months) {
+  const d = new Date(dateStr + "T00:00:00Z");
+  d.setUTCMonth(d.getUTCMonth() + months);
+  return d.toISOString().slice(0, 10);
+}
+
+routes.give = async (view, params) => {
+  const products = await loadProducts(true);
+  setHeader("Give stock", "Hand units to a customer against an invoice", "");
+
+  const available = products.filter((p) => p.inStock > 0);
+  if (!available.length) {
+    view.innerHTML = emptyState(
+      "－",
+      "Nothing is in stock right now. Add stock first.",
+      `<button class="btn primary" id="ga">Go to Add stock</button>`,
+    );
+    $("#ga", view).addEventListener("click", () => go("intake"));
+    return;
+  }
+
+  const today = new Date().toISOString().slice(0, 10);
+  const selId = available.some((p) => p.id === params.productId)
+    ? params.productId
+    : available[0].id;
+
+  view.innerHTML = `
+    <div class="panel"><div class="panel-h"><h2>Customer</h2></div><div class="panel-b">
+      <label class="field"><span class="lab">Customer name</span>
+        <input id="g-name" maxlength="200" placeholder="e.g. Sharma Electronics"></label>
+      <div class="row">
+        <label class="field"><span class="lab">Customer phone</span>
+          <input id="g-phone" type="tel" maxlength="20" placeholder="e.g. 9876543210"></label>
+        <label class="field"><span class="lab">GST no <span class="muted">(optional)</span></span>
+          <input id="g-gst" class="mono" maxlength="15" placeholder="e.g. 27AAPFU0939F1ZV"
+            style="text-transform:uppercase"></label>
+      </div>
+    </div></div>
+
+    <div class="panel"><div class="panel-h"><h2>Invoice &amp; stock</h2></div><div class="panel-b">
+      <div class="row">
+        <label class="field"><span class="lab">Invoice no</span>
+          <input id="g-inv" class="mono" maxlength="64" placeholder="e.g. INV-2026-0142"></label>
+        <label class="field"><span class="lab">Given date</span>
+          <input id="g-date" type="date" value="${today}"></label>
+      </div>
+      <div class="row">
+        <label class="field"><span class="lab">Product</span>
+          <select id="g-product">
+            ${available
+              .map(
+                (p) =>
+                  `<option value="${p.id}" ${p.id === selId ? "selected" : ""}>${esc(p.name)} — ${esc(p.sku)} (${p.inStock} in stock)</option>`,
+              )
+              .join("")}
+          </select></label>
+        <label class="field"><span class="lab">Validity date</span>
+          <input id="g-valid" type="date">
+          <div class="hint" id="g-valid-hint"></div></label>
+      </div>
+
+      <div class="field">
+        <span class="lab">Stock</span>
+        <div class="seg-toggle" id="g-mode">
+          <button type="button" data-mode="pick" class="on">Pick serials</button>
+          <button type="button" data-mode="qty">Quantity (oldest first)</button>
+        </div>
+      </div>
+
+      <div id="g-pick-wrap">
+        <div class="toolbar" style="margin:4px 0 8px">
+          <div class="grow search"><span class="ic">⌕</span>
+            <input id="g-search" placeholder="Filter by serial…"></div>
+          <span class="muted" id="g-count" style="font-size:12.5px"></span>
+        </div>
+        <div class="pick-list" id="g-list"></div>
+      </div>
+
+      <div id="g-qty-wrap" style="display:none">
+        <label class="field" style="max-width:220px"><span class="lab">Quantity</span>
+          <input id="g-qty" type="number" min="1" value="1"></label>
+        <div class="hint" id="g-qty-hint"></div>
+      </div>
+
+      <label class="field" style="margin-top:14px"><span class="lab">Notes <span class="muted">(optional)</span></span>
+        <input id="g-notes" maxlength="2000"></label>
+
+      <div class="banner err" id="g-err" hidden></div>
+      <button class="btn primary" id="g-submit">Give stock</button>
+    </div></div>`;
+
+  let mode = "pick";
+  let units = []; // in-stock units of the selected product
+  const picked = new Set();
+  // The validity date follows given date + product warranty until edited by hand.
+  let validEdited = false;
+
+  const sel = $("#g-product", view);
+  const list = $("#g-list", view);
+  const product = () => available.find((p) => p.id === sel.value);
+
+  function syncValidity() {
+    const p = product();
+    const given = $("#g-date", view).value || today;
+    if (!validEdited) $("#g-valid", view).value = addMonths(given, p.warrantyMonths);
+    $("#g-valid-hint", view).textContent = validEdited
+      ? "Set by hand."
+      : `Given date + ${p.warrantyMonths} months warranty. You can change it.`;
+  }
+
+  function renderList() {
+    const needle = $("#g-search", view).value.trim().toLowerCase();
+    const shown = units.filter(
+      (u) =>
+        !needle ||
+        u.internalSerial.toLowerCase().includes(needle) ||
+        (u.manufacturerSerial || "").toLowerCase().includes(needle),
+    );
+    $("#g-count", view).textContent = `${picked.size} of ${units.length} selected`;
+    list.innerHTML = shown.length
+      ? shown
+          .map(
+            (u) => `<label class="pick-row">
+              <input type="checkbox" data-id="${u.id}" ${picked.has(u.id) ? "checked" : ""}>
+              ${serialPair(u.internalSerial, u.manufacturerSerial)}
+              <span class="d muted mono">in ${esc(u.intakeDate)}</span></label>`,
+          )
+          .join("")
+      : `<div class="muted" style="padding:14px">${units.length ? "No serial matches that filter." : "No units in stock."}</div>`;
+  }
+
+  async function loadUnits() {
+    picked.clear();
+    list.innerHTML = `<div class="muted" style="padding:14px">Loading…</div>`;
+    const data = await api(
+      `/units?productId=${sel.value}&status=in_stock&sort=oldest&limit=500`,
+    );
+    units = data.items;
+    renderList();
+    const p = product();
+    $("#g-qty", view).max = p.inStock;
+    $("#g-qty-hint", view).textContent = `${p.inStock} in stock. The oldest units go out first.`;
+  }
+
+  list.addEventListener("change", (e) => {
+    const cb = e.target.closest("input[type=checkbox]");
+    if (!cb) return;
+    if (cb.checked) picked.add(cb.dataset.id);
+    else picked.delete(cb.dataset.id);
+    $("#g-count", view).textContent = `${picked.size} of ${units.length} selected`;
+  });
+  $("#g-search", view).addEventListener("input", renderList);
+  $("#g-mode", view)
+    .querySelectorAll("button")
+    .forEach((b) =>
+      b.addEventListener("click", () => {
+        mode = b.dataset.mode;
+        $("#g-mode", view)
+          .querySelectorAll("button")
+          .forEach((x) => x.classList.toggle("on", x === b));
+        $("#g-pick-wrap", view).style.display = mode === "pick" ? "" : "none";
+        $("#g-qty-wrap", view).style.display = mode === "qty" ? "" : "none";
+      }),
+    );
+  sel.addEventListener("change", () => {
+    syncValidity();
+    loadUnits().catch((e) => toast(e.message, "err"));
+  });
+  $("#g-date", view).addEventListener("input", syncValidity);
+  $("#g-valid", view).addEventListener("input", (e) => {
+    validEdited = !!e.target.value;
+    syncValidity();
+  });
+
+  syncValidity();
+  await loadUnits();
+
+  $("#g-submit", view).addEventListener("click", async () => {
+    const errEl = $("#g-err", view);
+    const fail = (m) => {
+      errEl.textContent = m;
+      errEl.hidden = !m;
+    };
+    fail("");
+    const body = {
+      customerName: $("#g-name", view).value.trim(),
+      customerPhone: $("#g-phone", view).value.trim(),
+      gstNo: $("#g-gst", view).value.trim().toUpperCase() || null,
+      invoiceNo: $("#g-inv", view).value.trim(),
+      givenDate: $("#g-date", view).value,
+      validUntil: $("#g-valid", view).value || null,
+      productId: sel.value,
+      notes: $("#g-notes", view).value.trim(),
+    };
+    if (!body.customerName) return fail("Enter the customer name.");
+    if (!body.customerPhone) return fail("Enter the customer phone.");
+    if (!body.invoiceNo) return fail("Enter the invoice number.");
+    if (!body.givenDate) return fail("Enter the given date.");
+    if (mode === "pick") {
+      if (!picked.size) return fail("Select at least one unit to give.");
+      body.unitIds = [...picked];
+    } else {
+      const qty = Number($("#g-qty", view).value);
+      if (!qty || qty < 1) return fail("Quantity must be at least 1.");
+      if (qty > product().inStock) return fail(`Only ${product().inStock} in stock.`);
+      body.quantity = qty;
+    }
+
+    const btn = $("#g-submit", view);
+    btn.disabled = true;
+    btn.textContent = "Saving…";
+    try {
+      const d = await api("/dispatches", { method: "POST", body: JSON.stringify(body) });
+      toast(`Gave ${d.quantity} unit${d.quantity === 1 ? "" : "s"} to ${d.customerName}`, "ok");
+      state.products = null; // stock counts changed
+      go("dispatches?id=" + d.id);
+    } catch (e) {
+      fail(validationMessage(e));
+      btn.disabled = false;
+      btn.textContent = "Give stock";
+    }
+  });
+};
+
+// ---------------------------------------------------------------- stock given
+routes.dispatches = async (view, params) => {
+  const products = await loadProducts();
+  const q = params.q || "";
+  const productId = params.productId || "";
+  const limit = 50;
+  const offset = Number(params.offset) || 0;
+
+  const qs = new URLSearchParams({ limit, offset });
+  if (q) qs.set("q", q);
+  if (productId) qs.set("productId", productId);
+  const data = await api("/dispatches?" + qs.toString());
+
+  setHeader(
+    "Stock given",
+    `${data.total} record${data.total === 1 ? "" : "s"}`,
+    `<button class="btn primary" data-new>－ Give stock</button>`,
+    (a) => a.querySelector("[data-new]").addEventListener("click", () => go("give")),
+  );
+
+  const updateFilter = (patch) => {
+    const next = { q, productId, offset: 0, ...patch };
+    const u = new URLSearchParams();
+    if (next.q) u.set("q", next.q);
+    if (next.productId) u.set("productId", next.productId);
+    if (next.offset) u.set("offset", next.offset);
+    location.hash = "#/dispatches?" + u.toString();
+  };
+
+  view.innerHTML = `
+    <div class="toolbar">
+      <div class="grow search"><span class="ic">⌕</span>
+        <input id="d-q" placeholder="Search invoice, customer, phone, GST no, serial…" value="${esc(q)}"></div>
+      <select id="d-product" style="width:auto">
+        <option value="">All products</option>
+        ${products
+          .map(
+            (p) =>
+              `<option value="${p.id}" ${p.id === productId ? "selected" : ""}>${esc(p.name)}</option>`,
+          )
+          .join("")}
+      </select>
+    </div>
+
+    <div class="panel"><div class="panel-b flush">
+    ${
+      data.items.length
+        ? `<table>
+        <thead><tr><th>Given</th><th>Invoice</th><th>Customer</th><th>GST no</th><th>Product</th><th>Qty</th><th>Valid until</th><th></th></tr></thead>
+        <tbody>
+          ${data.items
+            .map(
+              (d) => `
+            <tr>
+              <td class="mono" style="font-size:12.5px;white-space:nowrap">${esc(d.givenDate)}</td>
+              <td class="mono">${esc(d.invoiceNo)}</td>
+              <td><b>${esc(d.customerName)}</b><div class="muted mono" style="font-size:12px">${esc(d.customerPhone)}</div></td>
+              <td class="mono" style="font-size:12.5px">${d.gstNo ? esc(d.gstNo) : `<span class="muted">—</span>`}</td>
+              <td><b>${esc(d.productName)}</b><div class="muted mono" style="font-size:12px">${esc(d.sku)}</div></td>
+              <td><b>${d.quantity}</b></td>
+              <td class="mono" style="font-size:12.5px;white-space:nowrap">${d.validUntil ? esc(d.validUntil) : `<span class="muted">—</span>`}</td>
+              <td style="text-align:right"><button class="btn sm ghost" data-open="${d.id}">Details</button></td>
+            </tr>`,
+            )
+            .join("")}
+        </tbody></table>`
+        : emptyState("⇥", q || productId ? "No records match these filters." : "No stock has been given out yet.")
+    }
+    </div></div>
+
+    ${
+      data.total > limit
+        ? `<div class="toolbar" style="justify-content:flex-end">
+            <button class="btn sm" id="prev" ${offset === 0 ? "disabled" : ""}>← Prev</button>
+            <span class="muted" style="font-size:12.5px">${offset + 1}–${Math.min(offset + limit, data.total)} of ${data.total}</span>
+            <button class="btn sm" id="next" ${offset + limit >= data.total ? "disabled" : ""}>Next →</button>
+          </div>`
+        : ""
+    }`;
+
+  let qTimer;
+  $("#d-q", view).addEventListener("input", (e) => {
+    clearTimeout(qTimer);
+    const val = e.target.value;
+    qTimer = setTimeout(() => updateFilter({ q: val }), 300);
+  });
+  $("#d-product", view).addEventListener("change", (e) =>
+    updateFilter({ productId: e.target.value }),
+  );
+  const prevBtn = $("#prev", view);
+  const nextBtn = $("#next", view);
+  if (prevBtn)
+    prevBtn.addEventListener("click", () => updateFilter({ offset: Math.max(0, offset - limit) }));
+  if (nextBtn)
+    nextBtn.addEventListener("click", () => updateFilter({ offset: offset + limit }));
+
+  view.querySelectorAll("[data-open]").forEach((b) =>
+    b.addEventListener("click", () => dispatchModal(b.dataset.open)),
+  );
+  // Arriving from Give stock: show the record that was just saved.
+  if (params.id) dispatchModal(params.id);
+};
+
+async function dispatchModal(id) {
+  let d;
+  try {
+    d = await api("/dispatches/" + id);
+  } catch (e) {
+    return toast(e.message, "err");
+  }
+  openModal({
+    title: `Invoice ${d.invoiceNo}`,
+    body: `
+      <div class="cert-grid" style="border-radius:10px;border:1px solid var(--line);margin-bottom:16px">
+        <div class="c"><div class="k">Customer</div><div class="v">${esc(d.customerName)}</div></div>
+        <div class="c"><div class="k">Phone</div><div class="v mono">${esc(d.customerPhone)}</div></div>
+        <div class="c"><div class="k">GST no</div><div class="v mono">${d.gstNo ? esc(d.gstNo) : "—"}</div></div>
+        <div class="c"><div class="k">Product</div><div class="v">${esc(d.productName)}</div></div>
+        <div class="c"><div class="k">Given date</div><div class="v mono">${esc(d.givenDate)}</div></div>
+        <div class="c"><div class="k">Valid until</div><div class="v mono">${d.validUntil ? esc(d.validUntil) : "—"}</div></div>
+      </div>
+      <div class="lab" style="font-size:12.5px;font-weight:600;color:var(--ink-soft);margin-bottom:6px">
+        ${d.quantity} unit${d.quantity === 1 ? "" : "s"} given</div>
+      <div class="pick-list">
+        ${
+          d.units.length
+            ? d.units
+                .map(
+                  (u) => `<div class="pick-row" style="cursor:default">
+                    ${serialPair(u.internalSerial, u.manufacturerSerial)}
+                    <span class="d">${statusChip(u.status)}</span></div>`,
+                )
+                .join("")
+            : `<div class="muted" style="padding:14px">No units are linked to this record any more.</div>`
+        }
+      </div>
+      ${d.notes ? `<div class="hint" style="margin-top:12px">Notes: ${esc(d.notes)}</div>` : ""}
+      <div class="hint" style="margin-top:8px">Entered${d.createdByName ? " by " + esc(d.createdByName) : ""} on ${esc(new Date(d.createdAt).toLocaleString())}</div>`,
+    footer: `
+      ${isAdmin() ? `<button class="btn danger" data-del style="margin-right:auto">Undo &amp; return to stock</button>` : ""}
+      <button class="btn" data-cancel>Close</button>`,
+    onMount(root, close) {
+      $("[data-cancel]", root).addEventListener("click", close);
+      const del = $("[data-del]", root);
+      if (del)
+        del.addEventListener("click", async () => {
+          if (!confirm(`Delete this record and put its sold units back in stock?`)) return;
+          try {
+            await api("/dispatches/" + d.id, { method: "DELETE" });
+            toast("Record deleted, units back in stock", "ok");
+            state.products = null;
+            close();
+            go("dispatches");
+            render();
+          } catch (e) {
+            toast(e.message, "err");
+          }
+        });
+    },
+  });
+}
+
 // ------------------------------------------------------------------ inventory
 routes.inventory = async (view, params) => {
   const products = await loadProducts();

@@ -15,6 +15,7 @@ interface UnitRow extends RowDataPacket {
   warranty_months: number;
   sold_to: string | null;
   sold_date: string | null;
+  dispatch_id: string | null;
   notes: string;
   created_at: Date;
   updated_at: Date;
@@ -35,6 +36,7 @@ function mapUnit(row: UnitRow): Unit {
     warrantyMonths: row.warranty_months,
     soldTo: row.sold_to,
     soldDate: row.sold_date,
+    dispatchId: row.dispatch_id,
     notes: row.notes,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
@@ -237,6 +239,19 @@ export async function listUnitsByProduct(
      WHERE u.product_id = ?
      ORDER BY u.seq ASC`,
     [productId],
+  );
+  return rows.map(mapUnitView);
+}
+
+export async function listUnitsByDispatch(
+  dispatchId: string,
+): Promise<UnitView[]> {
+  const [rows] = await pool.query<UnitViewRow[]>(
+    `SELECT u.*, p.name AS product_name, p.sku AS product_sku
+     FROM units u JOIN products p ON p.id = u.product_id
+     WHERE u.dispatch_id = ?
+     ORDER BY u.seq ASC`,
+    [dispatchId],
   );
   return rows.map(mapUnitView);
 }
