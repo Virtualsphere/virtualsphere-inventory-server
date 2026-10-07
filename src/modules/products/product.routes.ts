@@ -14,13 +14,13 @@ import {
   listProducts,
   updateProduct,
 } from "./product.service";
-import { listUnitsForProduct } from "../units/unit.service";
+import { listModules } from "../modules/module.service";
 
 export const productRoutes = Router();
 
 const idParam = z.object({ id: z.string().uuid("invalid product id") });
 
-// GET /api/products
+// GET /api/products   (with module / unit counts)
 productRoutes.get(
   "/",
   asyncHandler(async (_req, res) => {
@@ -37,7 +37,7 @@ productRoutes.post(
   }),
 );
 
-// GET /api/products/:id   (product + unit counts)
+// GET /api/products/:id   (product + counts)
 productRoutes.get(
   "/:id",
   asyncHandler(async (req, res) => {
@@ -46,12 +46,13 @@ productRoutes.get(
   }),
 );
 
-// GET /api/products/:id/units   (all units of this product)
+// GET /api/products/:id/modules   (this product's modules, with unit counts)
 productRoutes.get(
-  "/:id/units",
+  "/:id/modules",
   asyncHandler(async (req, res) => {
     const { id } = parse(idParam, req.params);
-    res.json(await listUnitsForProduct(id));
+    await getProduct(id); // 404 for an unknown product rather than []
+    res.json(await listModules(id));
   }),
 );
 
@@ -65,7 +66,7 @@ productRoutes.patch(
   }),
 );
 
-// DELETE /api/products/:id   (admin only; cascades to its units)
+// DELETE /api/products/:id   (admin only; refused while it has modules)
 productRoutes.delete(
   "/:id",
   requireAdmin,

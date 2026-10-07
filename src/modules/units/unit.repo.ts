@@ -5,7 +5,7 @@ import type { Unit, UnitStatus, UnitView } from "../../types";
 
 interface UnitRow extends RowDataPacket {
   id: string;
-  product_id: string;
+  module_id: string;
   seq: number;
   internal_serial: string;
   manufacturer_serial: string | null;
@@ -21,12 +21,17 @@ interface UnitRow extends RowDataPacket {
   updated_at: Date;
 }
 
-type UnitViewRow = UnitRow & { product_name: string; product_sku: string };
+type UnitViewRow = UnitRow & {
+  module_name: string;
+  module_sku: string;
+  product_id: string;
+  product_name: string;
+};
 
 function mapUnit(row: UnitRow): Unit {
   return {
     id: row.id,
-    productId: row.product_id,
+    moduleId: row.module_id,
     seq: row.seq,
     internalSerial: row.internal_serial,
     manufacturerSerial: row.manufacturer_serial,
@@ -46,13 +51,26 @@ function mapUnit(row: UnitRow): Unit {
 function mapUnitView(row: UnitViewRow): UnitView {
   return {
     ...mapUnit(row),
+    moduleName: row.module_name,
+    sku: row.module_sku,
+    productId: row.product_id,
     productName: row.product_name,
-    sku: row.product_sku,
   };
 }
 
+/** Units joined with their module and the module's product. */
+const VIEW_FROM = `
+  FROM units u
+  JOIN modules m ON m.id = u.module_id
+  JOIN products p ON p.id = m.product_id`;
+
+const VIEW_SELECT = `
+  SELECT u.*, m.name AS module_name, m.sku AS module_sku,
+         p.id AS product_id, p.name AS product_name
+  ${VIEW_FROM}`;
+
 export interface InsertableUnit {
-  productId: string;
+  moduleId: string;
   seq: number;
   internalSerial: string;
   manufacturerSerial: string | null;
@@ -63,7 +81,7 @@ export interface InsertableUnit {
 }
 
 /**
- * Bulk-insert units for ONE product on the given transaction connection.
+ * Bulk-insert units for ONE module on the given transaction connection.
  * Returns the inserted rows in seq order.
  */
 export async function bulkInsertUnits(
@@ -73,7 +91,7 @@ export async function bulkInsertUnits(
   if (units.length === 0) return [];
   const cols = [
     "id",
-    "product_id",
+    "module_id",
     "seq",
     "internal_serial",
     "manufacturer_serial",
@@ -87,7 +105,7 @@ export async function bulkInsertUnits(
   // no server placeholder limit, which matters for 5000-unit intakes.
   const values = units.map((u) => [
     randomUUID(),
-    u.productId,
+    u.moduleId,
     u.seq,
     u.internalSerial,
     u.manufacturerSerial,
@@ -107,14 +125,14 @@ export async function bulkInsertUnits(
   const seqs = units.map((u) => u.seq);
   const [rows] = await conn.query<UnitRow[]>(
     `SELECT * FROM units
-     WHERE product_id = ? AND seq BETWEEN ? AND ?
+     WHERE module_id = ? AND seq BETWEEN ? AND ?
      ORDER BY seq ASC`,
-    [units[0]!.productId, Math.min(...seqs), Math.max(...seqs)],
+    [units[0]!.moduleId, Math.min(...seqs), Math.max(...seqs)],
   );
   return rows.map(mapUnit);
 }
 
-/** Which of `serials` are already used as an internal serial (any product). */
+/** Which of `serials` are already used as an internal serial (any module). */
 export async function findExistingInternalSerials(
   conn: PoolConnection,
   serials: string[],
@@ -129,6 +147,7 @@ export async function findExistingInternalSerials(
 
 interface UnitFilters {
   q?: string;
+  moduleId?: string;
   productId?: string;
   status?: UnitStatus;
 }
@@ -140,9 +159,13 @@ function buildWhere(filters: UnitFilters): {
   const conds: string[] = [];
   const params: unknown[] = [];
 
+  if (filters.moduleId) {
+    params.push(filters.moduleId);
+    conds.push("u.module_id = ?");
+  }
   if (filters.productId) {
     params.push(filters.productId);
-    conds.push("u.product_id = ?");
+    conds.push("m.product_id = ?");
   }
   if (filters.status) {
     params.push(filters.status);
@@ -151,12 +174,13 @@ function buildWhere(filters: UnitFilters): {
   if (filters.q) {
     // Columns use a case-insensitive collation, so LIKE needs no lower().
     const like = `%${filters.q}%`;
-    params.push(like, like, like, like);
+    params.push(like, like, like, like, like);
     conds.push(
       `(u.internal_serial LIKE ?
         OR u.manufacturer_serial LIKE ?
-        OR p.name LIKE ?
-        OR p.sku LIKE ?)`,
+        OR m.name LIKE ?
+        OR m.sku LIKE ?
+        OR p.name LIKE ?)`,
     );
   }
 
@@ -181,6 +205,7 @@ export interface ListUnitsResult {
 
 export async function listUnits(opts: {
   q?: string;
+  moduleId?: string;
   productId?: string;
   status?: UnitStatus;
   sort: "newest" | "oldest" | "serial";
@@ -191,7 +216,7 @@ export async function listUnits(opts: {
 
   const [countRows] = await pool.query<RowDataPacket[]>(
     `SELECT COUNT(*) AS count
-     FROM units u JOIN products p ON p.id = u.product_id
+     ${VIEW_FROM}
      ${clause}`,
     params,
   );
@@ -199,8 +224,7 @@ export async function listUnits(opts: {
 
   const order = ORDER_BY[opts.sort] ?? ORDER_BY["newest"];
   const [rows] = await pool.query<UnitViewRow[]>(
-    `SELECT u.*, p.name AS product_name, p.sku AS product_sku
-     FROM units u JOIN products p ON p.id = u.product_id
+    `${VIEW_SELECT}
      ${clause}
      ORDER BY ${order}
      LIMIT ? OFFSET ?`,
@@ -221,24 +245,22 @@ export async function listUnitsForExport(
 ): Promise<UnitView[]> {
   const { clause, params } = buildWhere(filters);
   const [rows] = await pool.query<UnitViewRow[]>(
-    `SELECT u.*, p.name AS product_name, p.sku AS product_sku
-     FROM units u JOIN products p ON p.id = u.product_id
+    `${VIEW_SELECT}
      ${clause}
-     ORDER BY p.name ASC, u.seq ASC`,
+     ORDER BY p.name ASC, m.name ASC, u.seq ASC`,
     params,
   );
   return rows.map(mapUnitView);
 }
 
-export async function listUnitsByProduct(
-  productId: string,
+export async function listUnitsByModule(
+  moduleId: string,
 ): Promise<UnitView[]> {
   const [rows] = await pool.query<UnitViewRow[]>(
-    `SELECT u.*, p.name AS product_name, p.sku AS product_sku
-     FROM units u JOIN products p ON p.id = u.product_id
-     WHERE u.product_id = ?
+    `${VIEW_SELECT}
+     WHERE u.module_id = ?
      ORDER BY u.seq ASC`,
-    [productId],
+    [moduleId],
   );
   return rows.map(mapUnitView);
 }
@@ -247,8 +269,7 @@ export async function listUnitsByDispatch(
   dispatchId: string,
 ): Promise<UnitView[]> {
   const [rows] = await pool.query<UnitViewRow[]>(
-    `SELECT u.*, p.name AS product_name, p.sku AS product_sku
-     FROM units u JOIN products p ON p.id = u.product_id
+    `${VIEW_SELECT}
      WHERE u.dispatch_id = ?
      ORDER BY u.seq ASC`,
     [dispatchId],
@@ -258,8 +279,7 @@ export async function listUnitsByDispatch(
 
 export async function findUnitById(id: string): Promise<UnitView | null> {
   const [rows] = await pool.query<UnitViewRow[]>(
-    `SELECT u.*, p.name AS product_name, p.sku AS product_sku
-     FROM units u JOIN products p ON p.id = u.product_id
+    `${VIEW_SELECT}
      WHERE u.id = ?`,
     [id],
   );
@@ -273,8 +293,7 @@ export async function findUnitBySerial(
   // Case-insensitive via the column collation (and index-friendly).
   const needle = serial.trim();
   const [rows] = await pool.query<UnitViewRow[]>(
-    `SELECT u.*, p.name AS product_name, p.sku AS product_sku
-     FROM units u JOIN products p ON p.id = u.product_id
+    `${VIEW_SELECT}
      WHERE u.internal_serial = ? OR u.manufacturer_serial = ?
      LIMIT 1`,
     [needle, needle],
@@ -289,8 +308,7 @@ export async function suggestUnitsBySerial(
 ): Promise<UnitView[]> {
   const needle = `%${serial.trim()}%`;
   const [rows] = await pool.query<UnitViewRow[]>(
-    `SELECT u.*, p.name AS product_name, p.sku AS product_sku
-     FROM units u JOIN products p ON p.id = u.product_id
+    `${VIEW_SELECT}
      WHERE u.internal_serial LIKE ? OR u.manufacturer_serial LIKE ?
      ORDER BY u.internal_serial ASC
      LIMIT ?`,

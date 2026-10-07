@@ -6,16 +6,13 @@ import type { Product, ProductWithCounts } from "../../types";
 interface ProductRow extends RowDataPacket {
   id: string;
   name: string;
-  sku: string;
   description: string;
-  warranty_months: number;
-  serial_prefix: string | null;
-  next_seq: number;
   created_at: Date;
   updated_at: Date;
 }
 
 type ProductCountRow = ProductRow & {
+  module_count: number;
   total_units: number;
   in_stock: number;
 };
@@ -24,11 +21,7 @@ function mapProduct(row: ProductRow): Product {
   return {
     id: row.id,
     name: row.name,
-    sku: row.sku,
     description: row.description,
-    warrantyMonths: row.warranty_months,
-    serialPrefix: row.serial_prefix,
-    nextSeq: row.next_seq,
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString(),
   };
@@ -37,6 +30,7 @@ function mapProduct(row: ProductRow): Product {
 function mapProductWithCounts(row: ProductCountRow): ProductWithCounts {
   return {
     ...mapProduct(row),
+    moduleCount: row.module_count,
     totalUnits: row.total_units,
     inStock: row.in_stock,
   };
@@ -44,37 +38,42 @@ function mapProductWithCounts(row: ProductCountRow): ProductWithCounts {
 
 export interface NewProduct {
   name: string;
-  sku: string;
   description: string;
-  warrantyMonths: number;
-  serialPrefix: string | null;
 }
 
 export async function insertProduct(data: NewProduct): Promise<Product> {
   // MySQL has no RETURNING: generate the id here, insert, then read it back.
   const id = randomUUID();
   await pool.query(
-    `INSERT INTO products (id, name, sku, description, warranty_months, serial_prefix)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [id, data.name, data.sku, data.description, data.warrantyMonths, data.serialPrefix],
+    "INSERT INTO products (id, name, description) VALUES (?, ?, ?)",
+    [id, data.name, data.description],
   );
   return (await findProductById(id))!;
 }
 
-// SUM() yields DECIMAL (a string in mysql2) and NULL over zero rows, so the
-// in-stock count is COALESCEd and CAST to an integer.
+// Units are counted per module first, so joining modules -> units doesn't
+// multiply the module count. SUM() yields DECIMAL (a string in mysql2) and
+// NULL over zero rows, hence the COALESCE + CAST.
 const COUNTS_SQL = `
   SELECT p.*,
-         COUNT(u.id)                                                     AS total_units,
-         CAST(COALESCE(SUM(u.status = 'in_stock'), 0) AS SIGNED)         AS in_stock
+         COUNT(m.id)                                           AS module_count,
+         CAST(COALESCE(SUM(mc.total_units), 0) AS SIGNED)      AS total_units,
+         CAST(COALESCE(SUM(mc.in_stock), 0) AS SIGNED)         AS in_stock
   FROM products p
-  LEFT JOIN units u ON u.product_id = p.id`;
+  LEFT JOIN modules m ON m.product_id = p.id
+  LEFT JOIN (
+    SELECT module_id,
+           COUNT(*)                AS total_units,
+           SUM(status = 'in_stock') AS in_stock
+    FROM units
+    GROUP BY module_id
+  ) mc ON mc.module_id = m.id`;
 
 export async function listProductsWithCounts(): Promise<ProductWithCounts[]> {
   const [rows] = await pool.query<ProductCountRow[]>(
     `${COUNTS_SQL}
      GROUP BY p.id
-     ORDER BY p.created_at DESC`,
+     ORDER BY p.name ASC`,
   );
   return rows.map(mapProductWithCounts);
 }

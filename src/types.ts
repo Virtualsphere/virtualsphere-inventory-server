@@ -7,8 +7,27 @@ export const UNIT_STATUSES: readonly UnitStatus[] = [
   "defective",
 ] as const;
 
+/** A product: the top-level grouping that several modules belong to. */
 export interface Product {
   id: string;
+  name: string;
+  description: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Product plus denormalized module/unit counts, for list views. */
+export interface ProductWithCounts extends Product {
+  moduleCount: number;
+  totalUnits: number;
+  inStock: number;
+}
+
+/** A module: the stocked item. Units (stock) belong to a module. */
+export interface Module {
+  id: string;
+  productId: string;
+  productName: string;
   name: string;
   sku: string;
   description: string;
@@ -19,15 +38,15 @@ export interface Product {
   updatedAt: string;
 }
 
-/** Product plus denormalized unit counts, for list views. */
-export interface ProductWithCounts extends Product {
+/** Module plus denormalized unit counts, for list views. */
+export interface ModuleWithCounts extends Module {
   totalUnits: number;
   inStock: number;
 }
 
 export interface Unit {
   id: string;
-  productId: string;
+  moduleId: string;
   seq: number;
   internalSerial: string;
   manufacturerSerial: string | null;
@@ -43,23 +62,35 @@ export interface Unit {
   updatedAt: string;
 }
 
-/** A unit joined with its product's name and SKU, for list/detail/export. */
+/** A unit joined with its module and product, for list/detail/export. */
 export interface UnitView extends Unit {
-  productName: string;
+  moduleName: string;
   sku: string;
+  productId: string;
+  productName: string;
 }
 
-/** Stock given out to a customer (one product per record). */
+/** One module given in a hand-over. */
+export interface DispatchItem {
+  id: string;
+  moduleId: string;
+  moduleName: string;
+  sku: string;
+  productId: string;
+  productName: string;
+  quantity: number;
+}
+
+/** Stock given out to a customer: one invoice / customer, one or more modules. */
 export interface Dispatch {
   id: string;
   invoiceNo: string;
   customerName: string;
   customerPhone: string;
   gstNo: string | null;
-  productId: string;
-  productName: string;
-  sku: string;
+  /** Total units across all items. */
   quantity: number;
+  items: DispatchItem[];
   givenDate: string;
   validUntil: string | null;
   notes: string;

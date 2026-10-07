@@ -14,7 +14,7 @@ import {
   findUnitById,
   type InsertableUnit,
   listUnits,
-  listUnitsByProduct,
+  listUnitsByModule,
   listUnitsForExport,
   type ListUnitsResult,
   updateUnitRow,
@@ -30,10 +30,12 @@ function todayISO(): string {
 }
 
 /** Row shape returned by the locking SELECT inside intake. */
-interface LockedProductRow extends RowDataPacket {
+interface LockedModuleRow extends RowDataPacket {
   id: string;
   name: string;
   sku: string;
+  product_id: string;
+  product_name: string;
   warranty_months: number;
   serial_prefix: string | null;
   next_seq: number;
@@ -65,10 +67,10 @@ export interface IntakeResult {
  * INTAKE — the race-free core.
  *
  * The whole operation runs in one InnoDB transaction. `SELECT ... FOR UPDATE`
- * on the product row takes an exclusive row lock, so any other intake on the SAME product
+ * on the module row takes an exclusive row lock, so any other intake on the SAME module
  * blocks until this transaction commits and then reads the updated `next_seq`.
- * That serializes serial allocation per product: no two units can ever be
- * assigned the same sequence number (and the UNIQUE (product_id, seq) and
+ * That serializes serial allocation per module: no two units can ever be
+ * assigned the same sequence number (and the UNIQUE (module_id, seq) and
  * UNIQUE (internal_serial) indexes are the belt-and-braces backstop).
  */
 export async function intake(input: IntakeInput): Promise<IntakeResult> {
@@ -77,19 +79,21 @@ export async function intake(input: IntakeInput): Promise<IntakeResult> {
   const intakeDate = input.intakeDate ?? todayISO();
 
   return withTransaction(async (conn) => {
-    const [locked] = await conn.query<LockedProductRow[]>(
-      `SELECT id, name, sku, warranty_months, serial_prefix, next_seq
-       FROM products
-       WHERE id = ?
-       FOR UPDATE`,
-      [input.productId],
+    const [locked] = await conn.query<LockedModuleRow[]>(
+      `SELECT m.id, m.name, m.sku, m.warranty_months, m.serial_prefix, m.next_seq,
+              p.id AS product_id, p.name AS product_name
+       FROM modules m
+       JOIN products p ON p.id = m.product_id
+       WHERE m.id = ?
+       FOR UPDATE OF m`,
+      [input.moduleId],
     );
-    const product = locked[0];
-    if (!product) throw notFound("Product");
+    const mod = locked[0];
+    if (!mod) throw notFound("Module");
 
     const settings: Settings = await getSettings(conn);
-    const prefix = product.serial_prefix ?? settings.serialPrefix ?? "";
-    const code = productCode(product.sku, product.name);
+    const prefix = mod.serial_prefix ?? settings.serialPrefix ?? "";
+    const code = productCode(mod.sku, mod.name);
     const overrides = input.internalSerials ?? [];
 
     // Generated serials must not collide with this batch's overrides, nor with
@@ -101,8 +105,8 @@ export async function intake(input: IntakeInput): Promise<IntakeResult> {
     );
     const existing = new Set<string>();
     const window = count + 16;
-    let fetchedUpTo = product.next_seq;
-    let seq = product.next_seq;
+    let fetchedUpTo = mod.next_seq;
+    let seq = mod.next_seq;
 
     const nextGenerated = async (): Promise<string> => {
       for (;;) {
@@ -125,13 +129,13 @@ export async function intake(input: IntakeInput): Promise<IntakeResult> {
     for (let i = 0; i < count; i++) {
       const internalSerial = overrides[i] ?? (await nextGenerated());
       toInsert.push({
-        productId: product.id,
+        moduleId: mod.id,
         seq: seq++,
         internalSerial,
         manufacturerSerial: serials[i] ?? null,
         intakeDate,
         warrantyStart: intakeDate,
-        warrantyMonths: product.warranty_months,
+        warrantyMonths: mod.warranty_months,
         notes: input.notes,
       });
     }
@@ -143,21 +147,23 @@ export async function intake(input: IntakeInput): Promise<IntakeResult> {
       if (isUnique(err)) {
         throw duplicateSerialConflict(
           err,
-          "One or more manufacturer serials already exist for this product",
+          "One or more manufacturer serials already exist for this module",
         );
       }
       throw err;
     }
 
     await conn.query(
-      "UPDATE products SET next_seq = ?, updated_at = NOW(3) WHERE id = ?",
-      [seq, product.id],
+      "UPDATE modules SET next_seq = ?, updated_at = NOW(3) WHERE id = ?",
+      [seq, mod.id],
     );
 
     const units: UnitView[] = inserted.map((u) => ({
       ...u,
-      productName: product.name,
-      sku: product.sku,
+      moduleName: mod.name,
+      sku: mod.sku,
+      productId: mod.product_id,
+      productName: mod.product_name,
     }));
     return { created: units.length, units };
   });
@@ -166,6 +172,7 @@ export async function intake(input: IntakeInput): Promise<IntakeResult> {
 export function listUnitsPaged(input: ListUnitsInput): Promise<ListUnitsResult> {
   return listUnits({
     q: input.q,
+    moduleId: input.moduleId,
     productId: input.productId,
     status: input.status,
     sort: input.sort,
@@ -180,8 +187,8 @@ export async function getUnit(id: string): Promise<UnitView> {
   return unit;
 }
 
-export function listUnitsForProduct(productId: string): Promise<UnitView[]> {
-  return listUnitsByProduct(productId);
+export function listUnitsForModule(moduleId: string): Promise<UnitView[]> {
+  return listUnitsByModule(moduleId);
 }
 
 export async function updateUnit(
@@ -221,7 +228,7 @@ export async function updateUnit(
     if (isUnique(err)) {
       throw duplicateSerialConflict(
         err,
-        "That manufacturer serial already exists for this product",
+        "That manufacturer serial already exists for this module",
       );
     }
     throw err;
@@ -236,6 +243,7 @@ const CSV_COLUMNS: Array<[header: string, pick: (u: UnitView) => string]> = [
   ["internal_serial", (u) => u.internalSerial],
   ["manufacturer_serial", (u) => u.manufacturerSerial ?? ""],
   ["product_name", (u) => u.productName],
+  ["module_name", (u) => u.moduleName],
   ["sku", (u) => u.sku],
   ["status", (u) => u.status],
   ["intake_date", (u) => u.intakeDate],
@@ -255,6 +263,7 @@ function csvCell(value: string): string {
 
 export async function exportUnitsCsv(filters: {
   q?: string;
+  moduleId?: string;
   productId?: string;
   status?: UnitView["status"];
 }): Promise<string> {

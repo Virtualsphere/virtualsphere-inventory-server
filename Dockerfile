@@ -16,6 +16,8 @@ RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 COPY migrations ./migrations
 COPY public ./public
+# Company logo for the warranty-card PDFs.
+COPY logo.png ./logo.png
 EXPOSE 4000
 # Run migrations then start. (For stricter control, run `npm run migrate` as a
 # separate release step and drop the migrate call here.)

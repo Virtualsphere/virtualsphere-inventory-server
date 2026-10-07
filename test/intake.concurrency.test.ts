@@ -1,8 +1,8 @@
 /**
- * Proves the headline guarantee: concurrent intake on the SAME product never
- * produces duplicate serials, and the per-product counter stays exact.
+ * Proves the headline guarantee: concurrent intake on the SAME module never
+ * produces duplicate serials, and the per-module counter stays exact.
  *
- * This test DELETES all products and units, so it refuses to run against your
+ * This test DELETES all products, modules and units, so it refuses to run against your
  * normal database. Point it at a throwaway database:
  *
  *   mysql -u root -p -e "CREATE DATABASE stockroom_test; GRANT ALL ON stockroom_test.* TO 'stockroom'@'localhost';"
@@ -27,7 +27,7 @@ if (TEST_DB) {
 describe.skipIf(!TEST_DB)("concurrent intake serial allocation", () => {
   let pool: Pool;
   let intake: typeof import("../src/modules/units/unit.service").intake;
-  let productId: string;
+  let moduleId: string;
 
   beforeAll(async () => {
     const { runMigrations } = await import("../src/db/migrate");
@@ -37,13 +37,16 @@ describe.skipIf(!TEST_DB)("concurrent intake serial allocation", () => {
     ({ intake } = await import("../src/modules/units/unit.service"));
 
     await pool.query("DELETE FROM units");
+    await pool.query("DELETE FROM modules");
     await pool.query("DELETE FROM products");
 
-    productId = randomUUID();
+    const productId = randomUUID();
+    await pool.query("INSERT INTO products (id, name) VALUES (?, 'Concurrency Product')", [productId]);
+    moduleId = randomUUID();
     await pool.query(
-      `INSERT INTO products (id, name, sku, warranty_months)
-       VALUES (?, 'Concurrency Widget', 'CONC1', 12)`,
-      [productId],
+      `INSERT INTO modules (id, product_id, name, sku, warranty_months)
+       VALUES (?, ?, 'Concurrency Widget', 'CONC1', 12)`,
+      [moduleId, productId],
     );
   });
 
@@ -56,10 +59,10 @@ describe.skipIf(!TEST_DB)("concurrent intake serial allocation", () => {
     const PER_BATCH = 25;
     const EXPECTED = BATCHES * PER_BATCH;
 
-    // Fire all intakes at once — they contend for the same product row.
+    // Fire all intakes at once — they contend for the same module row.
     const results = await Promise.all(
       Array.from({ length: BATCHES }, () =>
-        intake({ productId, quantity: PER_BATCH, notes: "" } as never),
+        intake({ moduleId, quantity: PER_BATCH, notes: "" } as never),
       ),
     );
 
@@ -68,8 +71,8 @@ describe.skipIf(!TEST_DB)("concurrent intake serial allocation", () => {
 
     // Every seq from 1..EXPECTED appears exactly once.
     const [seqRows] = await pool.query<RowDataPacket[]>(
-      "SELECT seq FROM units WHERE product_id = ? ORDER BY seq",
-      [productId],
+      "SELECT seq FROM units WHERE module_id = ? ORDER BY seq",
+      [moduleId],
     );
     const seqs = seqRows.map((r) => r["seq"] as number);
     expect(seqs.length).toBe(EXPECTED);
@@ -86,10 +89,10 @@ describe.skipIf(!TEST_DB)("concurrent intake serial allocation", () => {
     );
     expect(Number(dupRows[0]!["count"])).toBe(0);
 
-    // The product counter advanced to exactly EXPECTED + 1.
+    // The module counter advanced to exactly EXPECTED + 1.
     const [prodRows] = await pool.query<RowDataPacket[]>(
-      "SELECT next_seq FROM products WHERE id = ?",
-      [productId],
+      "SELECT next_seq FROM modules WHERE id = ?",
+      [moduleId],
     );
     expect(prodRows[0]!["next_seq"]).toBe(EXPECTED + 1);
   });

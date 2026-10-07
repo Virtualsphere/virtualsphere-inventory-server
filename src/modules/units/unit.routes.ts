@@ -22,6 +22,7 @@ const idParam = z.object({ id: z.string().uuid("invalid unit id") });
 
 const exportQuery = z.object({
   q: z.string().trim().max(128).optional(),
+  moduleId: z.string().uuid().optional(),
   productId: z.string().uuid().optional(),
   status: unitStatusSchema.optional(),
 });

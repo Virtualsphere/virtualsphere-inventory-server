@@ -83,7 +83,6 @@ CREATE TABLE IF NOT EXISTS units (
 
     -- Lookup / filter support. (product_id is covered by the keys above.)
     KEY units_status_idx (status),
-    KEY units_mfr_serial_idx (manufacturer_serial),
     KEY units_created_at_idx (created_at),
 
     CONSTRAINT units_product_fk FOREIGN KEY (product_id)

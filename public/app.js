@@ -44,8 +44,8 @@ async function api(path, opts = {}) {
   return data;
 }
 
-/** Download an authenticated file (a plain <a href> can't send the JWT). */
-async function download(path, fallbackName) {
+/** Fetch an authenticated file as a blob plus its server-given filename. */
+async function fetchFile(path, fallbackName) {
   const res = await fetch("/api" + path, { headers: authHeaders() });
   if (!res.ok) {
     if (res.status === 401) signedOut();
@@ -54,6 +54,12 @@ async function download(path, fallbackName) {
   const blob = await res.blob();
   const cd = res.headers.get("Content-Disposition") || "";
   const name = (/filename="([^"]+)"/.exec(cd) || [])[1] || fallbackName;
+  return { blob, name };
+}
+
+/** Download an authenticated file (a plain <a href> can't send the JWT). */
+async function download(path, fallbackName) {
+  const { blob, name } = await fetchFile(path, fallbackName);
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -141,11 +147,11 @@ function toast(msg, kind = "") {
   }, 3200);
 }
 
-function openModal({ title, body, footer, onMount }) {
+function openModal({ title, body, footer, onMount, wide }) {
   const root = $("#modal-root");
   root.innerHTML = `
     <div class="overlay">
-      <div class="modal" role="dialog" aria-modal="true">
+      <div class="modal${wide ? " wide" : ""}" role="dialog" aria-modal="true">
         <div class="modal-h"><h3>${esc(title)}</h3>
           <button class="btn ghost sm" data-x>✕</button></div>
         <div class="modal-b">${body}</div>
@@ -190,7 +196,8 @@ function emptyState(icon, text, actionHtml) {
 }
 
 // --------------------------------------------------------------- shared state
-const state = { settings: null, products: null, user: null };
+// products: the top-level groups; modules: the stocked items, each in a product.
+const state = { settings: null, products: null, modules: null, user: null };
 
 async function loadSettings(force) {
   if (!state.settings || force) state.settings = await api("/settings");
@@ -200,6 +207,86 @@ async function loadSettings(force) {
 async function loadProducts(force) {
   if (!state.products || force) state.products = await api("/products");
   return state.products;
+}
+/** All modules, sorted by product name then module name. */
+async function loadModules(force) {
+  if (!state.modules || force) state.modules = await api("/modules");
+  return state.modules;
+}
+/** Stock counts changed: drop the cached lists so they're refetched. */
+function stockChanged() {
+  state.products = null;
+  state.modules = null;
+}
+
+/** A Product + Module select pair (ids `${prefix}-product` / `${prefix}-module`). */
+function modulePickerHtml(prefix) {
+  return `<div class="row">
+      <label class="field"><span class="lab">Product</span>
+        <select id="${prefix}-product"></select></label>
+      <label class="field"><span class="lab">Module</span>
+        <select id="${prefix}-module"></select></label>
+    </div>`;
+}
+
+/**
+ * Fill and wire a picker made by modulePickerHtml from `modules`. Changing the
+ * product refills the module list. Returns a getter for the selected module.
+ */
+function bindModulePicker(root, prefix, modules, selectedId, onChange) {
+  const pSel = $(`#${prefix}-product`, root);
+  const mSel = $(`#${prefix}-module`, root);
+  const products = [...new Map(modules.map((m) => [m.productId, m.productName]))];
+  const start = modules.find((m) => m.id === selectedId) || modules[0];
+  pSel.innerHTML = products
+    .map(
+      ([id, name]) =>
+        `<option value="${id}" ${id === start.productId ? "selected" : ""}>${esc(name)}</option>`,
+    )
+    .join("");
+  const fillModules = (keepId) => {
+    mSel.innerHTML = modules
+      .filter((m) => m.productId === pSel.value)
+      .map(
+        (m) =>
+          `<option value="${m.id}" ${m.id === keepId ? "selected" : ""}>${esc(m.name)} — ${esc(m.sku)} (${m.inStock} in stock)</option>`,
+      )
+      .join("");
+  };
+  fillModules(start.id);
+  pSel.addEventListener("change", () => {
+    fillModules();
+    onChange();
+  });
+  mSel.addEventListener("change", onChange);
+  return () => modules.find((m) => m.id === mSel.value);
+}
+
+/** Product + module filter selects for list pages; the module list follows the product. */
+function stockFilterHtml(prefix, products, modules, productId, moduleId) {
+  const mods = productId ? modules.filter((m) => m.productId === productId) : modules;
+  return `
+      <select id="${prefix}-product" style="width:auto">
+        <option value="">All products</option>
+        ${products
+          .map((p) => `<option value="${p.id}" ${p.id === productId ? "selected" : ""}>${esc(p.name)}</option>`)
+          .join("")}
+      </select>
+      <select id="${prefix}-module" style="width:auto">
+        <option value="">All modules</option>
+        ${mods
+          .map(
+            (m) =>
+              `<option value="${m.id}" ${m.id === moduleId ? "selected" : ""}>${esc(productId ? m.name : `${m.productName} · ${m.name}`)}</option>`,
+          )
+          .join("")}
+      </select>`;
+}
+
+/** Product name over "module · SKU", for table cells. */
+function moduleCell(x) {
+  return `<b>${esc(x.productName)}</b>
+    <div class="muted" style="font-size:12px">${esc(x.moduleName)} · <span class="mono">${esc(x.sku)}</span></div>`;
 }
 
 // -------------------------------------------------------------------- routing
@@ -249,6 +336,7 @@ routes.dashboard = async (view) => {
 
   const kpis = [
     ["Products", t.products, false],
+    ["Modules", t.modules, false],
     ["Total units", t.units, false],
     ["In stock", t.inStock, false],
     ["Sold", t.sold, false],
@@ -259,7 +347,7 @@ routes.dashboard = async (view) => {
     )
     .join("");
 
-  const low = stats.lowStock.filter((p) => p.inStock <= stats.lowStockThreshold);
+  const low = stats.lowStock.filter((m) => m.inStock <= stats.lowStockThreshold);
 
   view.innerHTML = `
     <div class="cards">${kpis}</div>
@@ -280,7 +368,7 @@ routes.dashboard = async (view) => {
                  <span><i style="background:${STATUS_COLOR.returned}"></i>Returned ${t.returned}</span>
                  <span><i style="background:${STATUS_COLOR.defective}"></i>Defective ${t.defective}</span>
                </div>`
-            : `<div class="muted">No units yet. Add a product, then add stock.</div>`
+            : `<div class="muted">No units yet. Add a product and its modules, then add stock.</div>`
         }
       </div>
     </div>
@@ -293,9 +381,9 @@ routes.dashboard = async (view) => {
             low.length
               ? `<table><tbody>${low
                   .map(
-                    (p) =>
-                      `<tr><td><b>${esc(p.name)}</b><div class="muted mono" style="font-size:12px">${esc(p.sku)}</div></td>
-                       <td style="text-align:right"><span class="chip ${p.inStock === 0 ? "defective" : "returned"}">${p.inStock} in stock</span></td></tr>`,
+                    (m) =>
+                      `<tr><td>${moduleCell({ productName: m.productName, moduleName: m.name, sku: m.sku })}</td>
+                       <td style="text-align:right"><span class="chip ${m.inStock === 0 ? "defective" : "returned"}">${m.inStock} in stock</span></td></tr>`,
                   )
                   .join("")}</tbody></table>`
               : `<div class="panel-b muted">Everything is above the threshold. 👍</div>`
@@ -312,7 +400,7 @@ routes.dashboard = async (view) => {
                   .map(
                     (u) =>
                       `<tr><td>${serialPair(u.internalSerial, u.manufacturerSerial)}</td>
-                       <td style="text-align:right" class="muted">${esc(u.productName)}</td></tr>`,
+                       <td style="text-align:right" class="muted">${esc(u.productName)} · ${esc(u.moduleName)}</td></tr>`,
                   )
                   .join("")}</tbody></table>`
               : `<div class="panel-b muted">Nothing yet.</div>`
@@ -327,11 +415,12 @@ routes.dashboard = async (view) => {
 };
 
 // ------------------------------------------------------------------- products
+// A product groups several modules; stock is added to and given from modules.
 routes.products = async (view) => {
-  const products = await loadProducts(true);
+  const [products, modules] = await Promise.all([loadProducts(true), loadModules(true)]);
   setHeader(
     "Products",
-    `${products.length} product${products.length === 1 ? "" : "s"}`,
+    `${products.length} product${products.length === 1 ? "" : "s"} · ${modules.length} module${modules.length === 1 ? "" : "s"}`,
     `<button class="btn primary" data-new>＋ New product</button>`,
     (a) => a.querySelector("[data-new]").addEventListener("click", () => productModal()),
   );
@@ -339,50 +428,71 @@ routes.products = async (view) => {
   if (!products.length) {
     view.innerHTML = emptyState(
       "▤",
-      "No products yet. Create your first product to start tracking units.",
+      "No products yet. Create a product, then add its modules to start tracking units.",
       `<button class="btn primary" id="np">＋ New product</button>`,
     );
     $("#np", view).addEventListener("click", () => productModal());
     return;
   }
 
-  view.innerHTML = `
-    <div class="panel"><div class="panel-b flush">
-    <table>
-      <thead><tr><th>Product</th><th>SKU</th><th>In stock</th><th>Total</th><th>Warranty</th><th></th></tr></thead>
-      <tbody>
-        ${products
-          .map(
-            (p) => `
+  view.innerHTML = products
+    .map((p) => {
+      const mods = modules.filter((m) => m.productId === p.id);
+      return `
+    <div class="panel">
+      <div class="panel-h">
+        <div style="min-width:0">
+          <h2>${esc(p.name)}</h2>
+          <div class="muted" style="font-size:12px;margin-top:2px">
+            ${p.description ? esc(p.description) + " · " : ""}${p.moduleCount} module${p.moduleCount === 1 ? "" : "s"} · ${p.inStock} in stock of ${p.totalUnits}</div>
+        </div>
+        <div style="white-space:nowrap">
+          <button class="btn sm primary" data-new-module="${p.id}">＋ Module</button>
+          ${p.totalUnits ? `<button class="btn sm" data-product-units="${p.id}">Units</button>` : ""}
+          <button class="btn sm ghost" data-edit-product="${p.id}">Edit</button>
+        </div>
+      </div>
+      <div class="panel-b flush">
+      ${
+        mods.length
+          ? `<table>
+        <thead><tr><th>Module</th><th>SKU</th><th>In stock</th><th>Total</th><th>Warranty</th><th></th></tr></thead>
+        <tbody>
+          ${mods
+            .map(
+              (m) => `
           <tr>
-            <td><b>${esc(p.name)}</b>${p.description ? `<div class="muted" style="font-size:12px">${esc(p.description)}</div>` : ""}</td>
-            <td class="mono">${esc(p.sku)}</td>
-            <td><b>${p.inStock}</b></td>
-            <td class="muted">${p.totalUnits}</td>
-            <td class="muted">${p.warrantyMonths} mo</td>
+            <td><b>${esc(m.name)}</b>${m.description ? `<div class="muted" style="font-size:12px">${esc(m.description)}</div>` : ""}</td>
+            <td class="mono">${esc(m.sku)}</td>
+            <td><b>${m.inStock}</b></td>
+            <td class="muted">${m.totalUnits}</td>
+            <td class="muted">${m.warrantyMonths} mo</td>
             <td style="text-align:right;white-space:nowrap">
-              <button class="btn sm primary" data-add="${p.id}">Add stock</button>
-              <button class="btn sm" data-view="${p.id}">Units</button>
-              <button class="btn sm ghost" data-edit="${p.id}">Edit</button>
+              <button class="btn sm primary" data-add="${m.id}">Add stock</button>
+              <button class="btn sm" data-view="${m.id}">Units</button>
+              <button class="btn sm ghost" data-edit-module="${m.id}">Edit</button>
             </td>
           </tr>`,
-          )
-          .join("")}
-      </tbody>
-    </table></div></div>`;
+            )
+            .join("")}
+        </tbody></table>`
+          : `<div class="panel-b muted">No modules yet. Add one to start adding stock to this product.</div>`
+      }
+      </div>
+    </div>`;
+    })
+    .join("");
 
-  view.querySelectorAll("[data-add]").forEach((b) =>
-    b.addEventListener("click", () => go("intake?productId=" + b.dataset.add)),
-  );
-  view.querySelectorAll("[data-view]").forEach((b) =>
-    b.addEventListener("click", () => go("inventory?productId=" + b.dataset.view)),
-  );
-  view.querySelectorAll("[data-edit]").forEach((b) =>
-    b.addEventListener("click", () => {
-      const p = products.find((x) => x.id === b.dataset.edit);
-      productModal(p);
-    }),
-  );
+  const on = (attr, fn) =>
+    view.querySelectorAll(`[${attr}]`).forEach((b) =>
+      b.addEventListener("click", () => fn(b.getAttribute(attr))),
+    );
+  on("data-add", (id) => go("intake?moduleId=" + id));
+  on("data-view", (id) => go("inventory?moduleId=" + id));
+  on("data-product-units", (id) => go("inventory?productId=" + id));
+  on("data-new-module", (id) => moduleModal(null, id));
+  on("data-edit-module", (id) => moduleModal(modules.find((m) => m.id === id)));
+  on("data-edit-product", (id) => productModal(products.find((p) => p.id === id)));
 };
 
 function productModal(product) {
@@ -390,51 +500,37 @@ function productModal(product) {
   openModal({
     title: editing ? "Edit product" : "New product",
     body: `
-      <label class="field"><span class="lab">Name</span>
-        <input id="p-name" value="${esc(product?.name || "")}" placeholder="VLD1030 module"></label>
-      <div class="row">
-        <label class="field"><span class="lab">SKU</span>
-          <input id="p-sku" class="mono" value="${esc(product?.sku || "")}" placeholder="VLD1030"></label>
-        <label class="field"><span class="lab">Warranty (months)</span>
-          <input id="p-war" type="number" min="0" value="${product?.warrantyMonths ?? state.settings?.defaultWarrantyMonths ?? 12}"></label>
-      </div>
-      <label class="field"><span class="lab">Serial prefix override <span class="muted">(optional)</span></span>
-        <input id="p-prefix" class="mono" value="${esc(product?.serialPrefix || "")}" placeholder="leave blank to use global '${esc(state.settings?.serialPrefix || "")}'"></label>
+      <label class="field"><span class="lab">Product name</span>
+        <input id="p-name" maxlength="200" value="${esc(product?.name || "")}" placeholder="e.g. RFID Reader Kit"></label>
       <label class="field"><span class="lab">Description <span class="muted">(optional)</span></span>
-        <input id="p-desc" value="${esc(product?.description || "")}"></label>
-      <div class="hint" id="p-err"></div>`,
-    footer: `${editing && isAdmin() ? `<button class="btn danger" data-del>Delete</button>` : ""}
+        <input id="p-desc" maxlength="2000" value="${esc(product?.description || "")}"></label>
+      ${editing ? "" : `<div class="hint">Next, add the modules that make up this product. Stock is added to each module.</div>`}
+      <div class="hint" id="p-err" style="color:var(--err-ink)"></div>`,
+    footer: `${editing && isAdmin() ? `<button class="btn danger" data-del style="margin-right:auto">Delete</button>` : ""}
              <button class="btn" data-cancel>Cancel</button>
              <button class="btn primary" data-save>${editing ? "Save" : "Create"}</button>`,
     onMount: (root, close) => {
       const errEl = $("#p-err", root);
-      const payload = () => ({
-        name: $("#p-name", root).value.trim(),
-        sku: $("#p-sku", root).value.trim(),
-        warrantyMonths: Number($("#p-war", root).value),
-        serialPrefix: $("#p-prefix", root).value.trim() || null,
-        description: $("#p-desc", root).value.trim(),
-      });
       $("[data-cancel]", root).addEventListener("click", close);
       $("[data-save]", root).addEventListener("click", async () => {
-        const body = payload();
-        if (!body.name || !body.sku) {
-          errEl.textContent = "Name and SKU are required.";
+        const body = {
+          name: $("#p-name", root).value.trim(),
+          description: $("#p-desc", root).value.trim(),
+        };
+        if (!body.name) {
+          errEl.textContent = "Product name is required.";
           return;
         }
         try {
           if (editing) {
-            await api("/products/" + product.id, {
-              method: "PATCH",
-              body: JSON.stringify(body),
-            });
+            await api("/products/" + product.id, { method: "PATCH", body: JSON.stringify(body) });
             toast("Product updated", "ok");
           } else {
             await api("/products", { method: "POST", body: JSON.stringify(body) });
             toast("Product created", "ok");
           }
           close();
-          await loadProducts(true);
+          stockChanged();
           render();
         } catch (e) {
           errEl.textContent = e.message;
@@ -443,53 +539,124 @@ function productModal(product) {
       const del = $("[data-del]", root);
       if (del)
         del.addEventListener("click", async () => {
-          if (
-            !confirm(
-              `Delete "${product.name}" and ALL its units? This cannot be undone.`,
-            )
-          )
-            return;
+          if (!confirm(`Delete product "${product.name}"?`)) return;
           try {
             await api("/products/" + product.id, { method: "DELETE" });
             toast("Product deleted", "ok");
             close();
-            await loadProducts(true);
+            stockChanged();
             render();
           } catch (e) {
             errEl.textContent = e.message;
           }
         });
+      $("#p-name", root).focus();
+    },
+  });
+}
+
+/** Create a module in `productId` (no `mod`), or edit `mod` — which can move it to another product. */
+function moduleModal(mod, productId) {
+  const editing = !!mod;
+  const products = state.products || [];
+  const currentProductId = mod?.productId || productId;
+  openModal({
+    title: editing ? "Edit module" : "New module",
+    body: `
+      <label class="field"><span class="lab">Product</span>
+        <select id="m-product">
+          ${products
+            .map(
+              (p) =>
+                `<option value="${p.id}" ${p.id === currentProductId ? "selected" : ""}>${esc(p.name)}</option>`,
+            )
+            .join("")}
+        </select></label>
+      <label class="field"><span class="lab">Module name</span>
+        <input id="m-name" maxlength="200" value="${esc(mod?.name || "")}" placeholder="e.g. VLD1030 module"></label>
+      <div class="row">
+        <label class="field"><span class="lab">SKU</span>
+          <input id="m-sku" class="mono" maxlength="64" value="${esc(mod?.sku || "")}" placeholder="VLD1030"></label>
+        <label class="field"><span class="lab">Warranty (months)</span>
+          <input id="m-war" type="number" min="0" value="${mod?.warrantyMonths ?? state.settings?.defaultWarrantyMonths ?? 12}"></label>
+      </div>
+      <label class="field"><span class="lab">Serial prefix override <span class="muted">(optional)</span></span>
+        <input id="m-prefix" class="mono" value="${esc(mod?.serialPrefix || "")}" placeholder="leave blank to use global '${esc(state.settings?.serialPrefix || "")}'"></label>
+      <label class="field"><span class="lab">Description <span class="muted">(optional)</span></span>
+        <input id="m-desc" maxlength="2000" value="${esc(mod?.description || "")}"></label>
+      <div class="hint" id="m-err" style="color:var(--err-ink)"></div>`,
+    footer: `${editing && isAdmin() ? `<button class="btn danger" data-del style="margin-right:auto">Delete</button>` : ""}
+             <button class="btn" data-cancel>Cancel</button>
+             <button class="btn primary" data-save>${editing ? "Save" : "Create"}</button>`,
+    onMount: (root, close) => {
+      const errEl = $("#m-err", root);
+      const payload = () => ({
+        productId: $("#m-product", root).value,
+        name: $("#m-name", root).value.trim(),
+        sku: $("#m-sku", root).value.trim(),
+        warrantyMonths: Number($("#m-war", root).value),
+        serialPrefix: $("#m-prefix", root).value.trim() || null,
+        description: $("#m-desc", root).value.trim(),
+      });
+      $("[data-cancel]", root).addEventListener("click", close);
+      $("[data-save]", root).addEventListener("click", async () => {
+        const body = payload();
+        if (!body.name || !body.sku) {
+          errEl.textContent = "Module name and SKU are required.";
+          return;
+        }
+        try {
+          if (editing) {
+            await api("/modules/" + mod.id, { method: "PATCH", body: JSON.stringify(body) });
+            toast("Module updated", "ok");
+          } else {
+            await api("/modules", { method: "POST", body: JSON.stringify(body) });
+            toast("Module created", "ok");
+          }
+          close();
+          stockChanged();
+          render();
+        } catch (e) {
+          errEl.textContent = e.message;
+        }
+      });
+      const del = $("[data-del]", root);
+      if (del)
+        del.addEventListener("click", async () => {
+          if (!confirm(`Delete module "${mod.name}" and ALL its units? This cannot be undone.`)) return;
+          try {
+            await api("/modules/" + mod.id, { method: "DELETE" });
+            toast("Module deleted", "ok");
+            close();
+            stockChanged();
+            render();
+          } catch (e) {
+            errEl.textContent = e.message;
+          }
+        });
+      $("#m-name", root).focus();
     },
   });
 }
 
 // --------------------------------------------------------------------- intake
 routes.intake = async (view, params) => {
-  const [products] = await Promise.all([loadProducts(true), loadSettings()]);
+  const [modules] = await Promise.all([loadModules(true), loadSettings()]);
   setHeader("Add stock", "Create units and map serials", "");
 
-  if (!products.length) {
+  if (!modules.length) {
     view.innerHTML = emptyState(
       "＋",
-      "You need a product first. Create one on the Products page.",
+      "You need a product with at least one module first. Create them on the Products page.",
       `<button class="btn primary" id="gp">Go to Products</button>`,
     );
     $("#gp", view).addEventListener("click", () => go("products"));
     return;
   }
 
-  const selId = params.productId || products[0].id;
   view.innerHTML = `
     <div class="panel"><div class="panel-b">
-      <label class="field"><span class="lab">Product</span>
-        <select id="i-product">
-          ${products
-            .map(
-              (p) =>
-                `<option value="${p.id}" ${p.id === selId ? "selected" : ""}>${esc(p.name)} — ${esc(p.sku)} (${p.inStock} in stock)</option>`,
-            )
-            .join("")}
-        </select></label>
+      ${modulePickerHtml("i")}
 
       <div class="field">
         <span class="lab">Intake mode</span>
@@ -527,13 +694,15 @@ routes.intake = async (view, params) => {
     </div></div>`;
 
   let mode = "serials";
-  const sel = $("#i-product", view);
   const serialsWrap = $("#i-serials-wrap", view);
   const qtyWrap = $("#i-qty-wrap", view);
   const prev = $("#i-preview", view);
   const countEl = $("#i-count", view);
 
-  const currentProduct = () => products.find((p) => p.id === sel.value);
+  const currentModule = bindModulePicker(view, "i", modules, params.moduleId, () => {
+    overrides = {}; // a different module means different generated serials
+    updatePreview();
+  });
   // Hand-edited internal serials, by row index. Unedited rows are generated.
   let overrides = {};
   // Supplier serials typed into the preview in quantity mode, by row index.
@@ -541,7 +710,7 @@ routes.intake = async (view, params) => {
   const PREVIEW_MAX = 40;
 
   function updatePreview() {
-    const p = currentProduct();
+    const p = currentModule();
     const prefix = p.serialPrefix || state.settings.serialPrefix || "";
     const code = productCode(p.sku, p.name);
     let items = [];
@@ -628,10 +797,6 @@ routes.intake = async (view, params) => {
         updatePreview();
       }),
     );
-  sel.addEventListener("change", () => {
-    overrides = {}; // a different product means different generated serials
-    updatePreview();
-  });
   $("#i-serials", view).addEventListener("input", updatePreview);
   $("#i-qty", view).addEventListener("input", updatePreview);
   updatePreview();
@@ -639,8 +804,8 @@ routes.intake = async (view, params) => {
   $("#i-submit", view).addEventListener("click", async () => {
     const errEl = $("#i-err", view);
     errEl.textContent = "";
-    const p = currentProduct();
-    const body = { productId: p.id, notes: $("#i-notes", view).value.trim() };
+    const m = currentModule();
+    const body = { moduleId: m.id, notes: $("#i-notes", view).value.trim() };
     if (mode === "serials") {
       const lines = $("#i-serials", view)
         .value.split("\n")
@@ -682,8 +847,8 @@ routes.intake = async (view, params) => {
         body: JSON.stringify(body),
       });
       toast(`Added ${r.created} unit${r.created === 1 ? "" : "s"}`, "ok");
-      await loadProducts(true);
-      go("inventory?productId=" + p.id);
+      stockChanged();
+      go("inventory?moduleId=" + m.id);
     } catch (e) {
       errEl.textContent = e.message;
       btn.disabled = false;
@@ -701,10 +866,10 @@ function addMonths(dateStr, months) {
 }
 
 routes.give = async (view, params) => {
-  const products = await loadProducts(true);
+  const modules = await loadModules(true);
   setHeader("Give stock", "Hand units to a customer against an invoice", "");
 
-  const available = products.filter((p) => p.inStock > 0);
+  const available = modules.filter((m) => m.inStock > 0);
   if (!available.length) {
     view.innerHTML = emptyState(
       "－",
@@ -716,9 +881,6 @@ routes.give = async (view, params) => {
   }
 
   const today = new Date().toISOString().slice(0, 10);
-  const selId = available.some((p) => p.id === params.productId)
-    ? params.productId
-    : available[0].id;
 
   view.innerHTML = `
     <div class="panel"><div class="panel-h"><h2>Customer</h2></div><div class="panel-b">
@@ -733,7 +895,7 @@ routes.give = async (view, params) => {
       </div>
     </div></div>
 
-    <div class="panel"><div class="panel-h"><h2>Invoice &amp; stock</h2></div><div class="panel-b">
+    <div class="panel"><div class="panel-h"><h2>Invoice</h2></div><div class="panel-b">
       <div class="row">
         <label class="field"><span class="lab">Invoice no</span>
           <input id="g-inv" class="mono" maxlength="64" placeholder="e.g. INV-2026-0142"></label>
@@ -741,135 +903,76 @@ routes.give = async (view, params) => {
           <input id="g-date" type="date" value="${today}"></label>
       </div>
       <div class="row">
-        <label class="field"><span class="lab">Product</span>
-          <select id="g-product">
-            ${available
-              .map(
-                (p) =>
-                  `<option value="${p.id}" ${p.id === selId ? "selected" : ""}>${esc(p.name)} — ${esc(p.sku)} (${p.inStock} in stock)</option>`,
-              )
-              .join("")}
-          </select></label>
         <label class="field"><span class="lab">Validity date</span>
           <input id="g-valid" type="date">
           <div class="hint" id="g-valid-hint"></div></label>
+        <label class="field"><span class="lab">Notes <span class="muted">(optional)</span></span>
+          <input id="g-notes" maxlength="2000"></label>
       </div>
+    </div></div>
 
-      <div class="field">
-        <span class="lab">Stock</span>
-        <div class="seg-toggle" id="g-mode">
-          <button type="button" data-mode="pick" class="on">Pick serials</button>
-          <button type="button" data-mode="qty">Quantity (oldest first)</button>
-        </div>
+    <div class="panel"><div class="panel-h"><h2>Products</h2>
+      <span class="muted" id="g-summary" style="font-size:12.5px"></span></div>
+      <div class="panel-b">
+        <div class="give-lines" id="g-lines"></div>
+        <button class="btn" id="g-add">＋ Add another product</button>
       </div>
+    </div>
 
-      <div id="g-pick-wrap">
-        <div class="toolbar" style="margin:4px 0 8px">
-          <div class="grow search"><span class="ic">⌕</span>
-            <input id="g-search" placeholder="Filter by serial…"></div>
-          <span class="muted" id="g-count" style="font-size:12.5px"></span>
-        </div>
-        <div class="pick-list" id="g-list"></div>
-      </div>
+    <div class="banner err" id="g-err" hidden></div>
+    <button class="btn primary" id="g-submit">Give stock</button>`;
 
-      <div id="g-qty-wrap" style="display:none">
-        <label class="field" style="max-width:220px"><span class="lab">Quantity</span>
-          <input id="g-qty" type="number" min="1" value="1"></label>
-        <div class="hint" id="g-qty-hint"></div>
-      </div>
-
-      <label class="field" style="margin-top:14px"><span class="lab">Notes <span class="muted">(optional)</span></span>
-        <input id="g-notes" maxlength="2000"></label>
-
-      <div class="banner err" id="g-err" hidden></div>
-      <button class="btn primary" id="g-submit">Give stock</button>
-    </div></div>`;
-
-  let mode = "pick";
-  let units = []; // in-stock units of the selected product
-  const picked = new Set();
-  // The validity date follows given date + product warranty until edited by hand.
+  // The validity date follows given date + the longest warranty among the
+  // chosen modules, until edited by hand.
   let validEdited = false;
-
-  const sel = $("#g-product", view);
-  const list = $("#g-list", view);
-  const product = () => available.find((p) => p.id === sel.value);
+  const lines = [];
+  let lineSeq = 0;
+  const linesEl = $("#g-lines", view);
 
   function syncValidity() {
-    const p = product();
+    const months = Math.max(...lines.map((l) => l.module().warrantyMonths));
     const given = $("#g-date", view).value || today;
-    if (!validEdited) $("#g-valid", view).value = addMonths(given, p.warrantyMonths);
+    if (!validEdited) $("#g-valid", view).value = addMonths(given, months);
     $("#g-valid-hint", view).textContent = validEdited
-      ? "Set by hand."
-      : `Given date + ${p.warrantyMonths} months warranty. You can change it.`;
+      ? "Set by hand. Applies to every product below."
+      : `Given date + ${months} months warranty${lines.length > 1 ? " (the longest of these modules)" : ""}. You can change it.`;
   }
 
-  function renderList() {
-    const needle = $("#g-search", view).value.trim().toLowerCase();
-    const shown = units.filter(
-      (u) =>
-        !needle ||
-        u.internalSerial.toLowerCase().includes(needle) ||
-        (u.manufacturerSerial || "").toLowerCase().includes(needle),
-    );
-    $("#g-count", view).textContent = `${picked.size} of ${units.length} selected`;
-    list.innerHTML = shown.length
-      ? shown
-          .map(
-            (u) => `<label class="pick-row">
-              <input type="checkbox" data-id="${u.id}" ${picked.has(u.id) ? "checked" : ""}>
-              ${serialPair(u.internalSerial, u.manufacturerSerial)}
-              <span class="d muted mono">in ${esc(u.intakeDate)}</span></label>`,
-          )
-          .join("")
-      : `<div class="muted" style="padding:14px">${units.length ? "No serial matches that filter." : "No units in stock."}</div>`;
+  function syncSummary() {
+    const units = lines.reduce((n, l) => n + l.count(), 0);
+    $("#g-summary", view).textContent =
+      `${lines.length} product${lines.length === 1 ? "" : "s"} · ${units} unit${units === 1 ? "" : "s"}`;
+    // A hand-over always has at least one line.
+    lines.forEach((l) => (l.removeBtn.hidden = lines.length === 1));
   }
 
-  async function loadUnits() {
-    picked.clear();
-    list.innerHTML = `<div class="muted" style="padding:14px">Loading…</div>`;
-    const data = await api(
-      `/units?productId=${sel.value}&status=in_stock&sort=oldest&limit=500`,
-    );
-    units = data.items;
-    renderList();
-    const p = product();
-    $("#g-qty", view).max = p.inStock;
-    $("#g-qty-hint", view).textContent = `${p.inStock} in stock. The oldest units go out first.`;
-  }
-
-  list.addEventListener("change", (e) => {
-    const cb = e.target.closest("input[type=checkbox]");
-    if (!cb) return;
-    if (cb.checked) picked.add(cb.dataset.id);
-    else picked.delete(cb.dataset.id);
-    $("#g-count", view).textContent = `${picked.size} of ${units.length} selected`;
-  });
-  $("#g-search", view).addEventListener("input", renderList);
-  $("#g-mode", view)
-    .querySelectorAll("button")
-    .forEach((b) =>
-      b.addEventListener("click", () => {
-        mode = b.dataset.mode;
-        $("#g-mode", view)
-          .querySelectorAll("button")
-          .forEach((x) => x.classList.toggle("on", x === b));
-        $("#g-pick-wrap", view).style.display = mode === "pick" ? "" : "none";
-        $("#g-qty-wrap", view).style.display = mode === "qty" ? "" : "none";
-      }),
-    );
-  sel.addEventListener("change", () => {
+  const changed = () => {
     syncValidity();
-    loadUnits().catch((e) => toast(e.message, "err"));
-  });
+    syncSummary();
+  };
+
+  function addLine(moduleId) {
+    // Default a new line to a module no other line is using yet.
+    const used = new Set(lines.map((l) => l.module().id));
+    const start = moduleId || (available.find((m) => !used.has(m.id)) || available[0]).id;
+    const line = giveLine(++lineSeq, available, start, changed, () => {
+      lines.splice(lines.indexOf(line), 1);
+      line.el.remove();
+      changed();
+    });
+    lines.push(line);
+    linesEl.appendChild(line.el);
+    changed();
+  }
+
+  $("#g-add", view).addEventListener("click", () => addLine());
   $("#g-date", view).addEventListener("input", syncValidity);
   $("#g-valid", view).addEventListener("input", (e) => {
     validEdited = !!e.target.value;
     syncValidity();
   });
 
-  syncValidity();
-  await loadUnits();
+  addLine(params.moduleId);
 
   $("#g-submit", view).addEventListener("click", async () => {
     const errEl = $("#g-err", view);
@@ -885,21 +988,23 @@ routes.give = async (view, params) => {
       invoiceNo: $("#g-inv", view).value.trim(),
       givenDate: $("#g-date", view).value,
       validUntil: $("#g-valid", view).value || null,
-      productId: sel.value,
       notes: $("#g-notes", view).value.trim(),
+      items: [],
     };
     if (!body.customerName) return fail("Enter the customer name.");
     if (!body.customerPhone) return fail("Enter the customer phone.");
     if (!body.invoiceNo) return fail("Enter the invoice number.");
     if (!body.givenDate) return fail("Enter the given date.");
-    if (mode === "pick") {
-      if (!picked.size) return fail("Select at least one unit to give.");
-      body.unitIds = [...picked];
-    } else {
-      const qty = Number($("#g-qty", view).value);
-      if (!qty || qty < 1) return fail("Quantity must be at least 1.");
-      if (qty > product().inStock) return fail(`Only ${product().inStock} in stock.`);
-      body.quantity = qty;
+    const seen = new Set();
+    for (const [i, line] of lines.entries()) {
+      const m = line.module();
+      if (seen.has(m.id)) {
+        return fail(`${m.productName} · ${m.name} is added twice. Remove one line, or give all of it on one line.`);
+      }
+      seen.add(m.id);
+      const item = line.item();
+      if (typeof item === "string") return fail(`Product ${i + 1} (${m.name}): ${item}`);
+      body.items.push(item);
     }
 
     const btn = $("#g-submit", view);
@@ -907,8 +1012,13 @@ routes.give = async (view, params) => {
     btn.textContent = "Saving…";
     try {
       const d = await api("/dispatches", { method: "POST", body: JSON.stringify(body) });
-      toast(`Gave ${d.quantity} unit${d.quantity === 1 ? "" : "s"} to ${d.customerName}`, "ok");
-      state.products = null; // stock counts changed
+      toast(
+        `Gave ${d.quantity} unit${d.quantity === 1 ? "" : "s"}` +
+          (d.items.length > 1 ? ` of ${d.items.length} products` : "") +
+          ` to ${d.customerName}`,
+        "ok",
+      );
+      stockChanged();
       go("dispatches?id=" + d.id);
     } catch (e) {
       fail(validationMessage(e));
@@ -918,17 +1028,148 @@ routes.give = async (view, params) => {
   });
 };
 
+/**
+ * One product line on the Give stock page: a product -> module picker, then
+ * either picked serials or a quantity. `item()` returns the API item, or an
+ * error message string.
+ */
+function giveLine(n, available, moduleId, onChange, onRemove) {
+  const prefix = "gl" + n;
+  const el = document.createElement("div");
+  el.className = "give-line";
+  el.innerHTML = `
+    <div class="give-line-h"><b class="n">Product</b>
+      <button type="button" class="btn sm ghost" data-remove>✕ Remove</button></div>
+    ${modulePickerHtml(prefix)}
+    <div class="field">
+      <span class="lab">Stock</span>
+      <div class="seg-toggle" data-modes>
+        <button type="button" data-mode="pick" class="on">Pick serials</button>
+        <button type="button" data-mode="qty">Quantity (oldest first)</button>
+      </div>
+    </div>
+    <div data-pick-wrap>
+      <div class="toolbar" style="margin:4px 0 8px">
+        <div class="grow search"><span class="ic">⌕</span>
+          <input data-search placeholder="Filter by serial…"></div>
+        <span class="muted" data-count style="font-size:12.5px"></span>
+      </div>
+      <div class="pick-list" data-list></div>
+    </div>
+    <div data-qty-wrap hidden>
+      <label class="field" style="max-width:220px;margin-bottom:4px"><span class="lab">Quantity</span>
+        <input data-qty type="number" min="1" value="1"></label>
+      <div class="hint" data-qty-hint></div>
+    </div>`;
+
+  let mode = "pick";
+  let units = []; // in-stock units of the selected module
+  const picked = new Set();
+  const list = $("[data-list]", el);
+  const qtyInput = $("[data-qty]", el);
+  const removeBtn = $("[data-remove]", el);
+
+  const module = bindModulePicker(el, prefix, available, moduleId, () => {
+    loadUnits().catch((e) => toast(e.message, "err"));
+    onChange();
+  });
+
+  const countText = () => `${picked.size} of ${units.length} selected`;
+
+  function renderList() {
+    const needle = $("[data-search]", el).value.trim().toLowerCase();
+    const shown = units.filter(
+      (u) =>
+        !needle ||
+        u.internalSerial.toLowerCase().includes(needle) ||
+        (u.manufacturerSerial || "").toLowerCase().includes(needle),
+    );
+    $("[data-count]", el).textContent = countText();
+    list.innerHTML = shown.length
+      ? shown
+          .map(
+            (u) => `<label class="pick-row">
+              <input type="checkbox" data-id="${u.id}" ${picked.has(u.id) ? "checked" : ""}>
+              ${serialPair(u.internalSerial, u.manufacturerSerial)}
+              <span class="d muted mono">in ${esc(u.intakeDate)}</span></label>`,
+          )
+          .join("")
+      : `<div class="muted" style="padding:14px">${units.length ? "No serial matches that filter." : "No units in stock."}</div>`;
+  }
+
+  async function loadUnits() {
+    picked.clear();
+    list.innerHTML = `<div class="muted" style="padding:14px">Loading…</div>`;
+    const m = module();
+    const data = await api(`/units?moduleId=${m.id}&status=in_stock&sort=oldest&limit=500`);
+    if (module().id !== m.id) return; // switched module while loading
+    units = data.items;
+    renderList();
+    qtyInput.max = m.inStock;
+    $("[data-qty-hint]", el).textContent = `${m.inStock} in stock. The oldest units go out first.`;
+    onChange();
+  }
+
+  list.addEventListener("change", (e) => {
+    const cb = e.target.closest("input[type=checkbox]");
+    if (!cb) return;
+    if (cb.checked) picked.add(cb.dataset.id);
+    else picked.delete(cb.dataset.id);
+    $("[data-count]", el).textContent = countText();
+    onChange();
+  });
+  $("[data-search]", el).addEventListener("input", renderList);
+  qtyInput.addEventListener("input", onChange);
+  $("[data-modes]", el)
+    .querySelectorAll("button")
+    .forEach((b) =>
+      b.addEventListener("click", () => {
+        mode = b.dataset.mode;
+        $("[data-modes]", el)
+          .querySelectorAll("button")
+          .forEach((x) => x.classList.toggle("on", x === b));
+        $("[data-pick-wrap]", el).hidden = mode !== "pick";
+        $("[data-qty-wrap]", el).hidden = mode !== "qty";
+        onChange();
+      }),
+    );
+  removeBtn.addEventListener("click", onRemove);
+
+  loadUnits().catch((e) => toast(e.message, "err"));
+
+  return {
+    el,
+    removeBtn,
+    module,
+    /** Units this line will give, for the running total. */
+    count: () => (mode === "pick" ? picked.size : Math.max(0, Number(qtyInput.value) || 0)),
+    item() {
+      const m = module();
+      if (mode === "pick") {
+        if (!picked.size) return "select at least one unit to give.";
+        return { moduleId: m.id, unitIds: [...picked] };
+      }
+      const qty = Number(qtyInput.value);
+      if (!qty || qty < 1) return "quantity must be at least 1.";
+      if (qty > m.inStock) return `only ${m.inStock} in stock.`;
+      return { moduleId: m.id, quantity: qty };
+    },
+  };
+}
+
 // ---------------------------------------------------------------- stock given
 routes.dispatches = async (view, params) => {
-  const products = await loadProducts();
+  const [products, modules] = await Promise.all([loadProducts(), loadModules()]);
   const q = params.q || "";
   const productId = params.productId || "";
+  const moduleId = params.moduleId || "";
   const limit = 50;
   const offset = Number(params.offset) || 0;
 
   const qs = new URLSearchParams({ limit, offset });
   if (q) qs.set("q", q);
   if (productId) qs.set("productId", productId);
+  if (moduleId) qs.set("moduleId", moduleId);
   const data = await api("/dispatches?" + qs.toString());
 
   setHeader(
@@ -939,10 +1180,11 @@ routes.dispatches = async (view, params) => {
   );
 
   const updateFilter = (patch) => {
-    const next = { q, productId, offset: 0, ...patch };
+    const next = { q, productId, moduleId, offset: 0, ...patch };
     const u = new URLSearchParams();
     if (next.q) u.set("q", next.q);
     if (next.productId) u.set("productId", next.productId);
+    if (next.moduleId) u.set("moduleId", next.moduleId);
     if (next.offset) u.set("offset", next.offset);
     location.hash = "#/dispatches?" + u.toString();
   };
@@ -950,23 +1192,15 @@ routes.dispatches = async (view, params) => {
   view.innerHTML = `
     <div class="toolbar">
       <div class="grow search"><span class="ic">⌕</span>
-        <input id="d-q" placeholder="Search invoice, customer, phone, GST no, serial…" value="${esc(q)}"></div>
-      <select id="d-product" style="width:auto">
-        <option value="">All products</option>
-        ${products
-          .map(
-            (p) =>
-              `<option value="${p.id}" ${p.id === productId ? "selected" : ""}>${esc(p.name)}</option>`,
-          )
-          .join("")}
-      </select>
+        <input id="d-q" placeholder="Search invoice, customer, phone, GST no, product, module, serial…" value="${esc(q)}"></div>
+      ${stockFilterHtml("d", products, modules, productId, moduleId)}
     </div>
 
     <div class="panel"><div class="panel-b flush">
     ${
       data.items.length
         ? `<table>
-        <thead><tr><th>Given</th><th>Invoice</th><th>Customer</th><th>GST no</th><th>Product</th><th>Qty</th><th>Valid until</th><th></th></tr></thead>
+        <thead><tr><th>Given</th><th>Invoice</th><th>Customer</th><th>GST no</th><th>Product / module</th><th>Qty</th><th>Valid until</th><th></th></tr></thead>
         <tbody>
           ${data.items
             .map(
@@ -976,15 +1210,19 @@ routes.dispatches = async (view, params) => {
               <td class="mono">${esc(d.invoiceNo)}</td>
               <td><b>${esc(d.customerName)}</b><div class="muted mono" style="font-size:12px">${esc(d.customerPhone)}</div></td>
               <td class="mono" style="font-size:12.5px">${d.gstNo ? esc(d.gstNo) : `<span class="muted">—</span>`}</td>
-              <td><b>${esc(d.productName)}</b><div class="muted mono" style="font-size:12px">${esc(d.sku)}</div></td>
+              <td>${d.items
+                .map((i) => `<div class="item-line">${moduleCell(i)}${d.items.length > 1 ? `<span class="muted">× ${i.quantity}</span>` : ""}</div>`)
+                .join("")}</td>
               <td><b>${d.quantity}</b></td>
               <td class="mono" style="font-size:12.5px;white-space:nowrap">${d.validUntil ? esc(d.validUntil) : `<span class="muted">—</span>`}</td>
-              <td style="text-align:right"><button class="btn sm ghost" data-open="${d.id}">Details</button></td>
+              <td style="text-align:right;white-space:nowrap">
+                <button class="btn sm" data-pdf="${d.id}" data-inv="${esc(d.invoiceNo)}" title="Download warranty card PDF">⤓ PDF</button>
+                <button class="btn sm ghost" data-open="${d.id}">Details</button></td>
             </tr>`,
             )
             .join("")}
         </tbody></table>`
-        : emptyState("⇥", q || productId ? "No records match these filters." : "No stock has been given out yet.")
+        : emptyState("⇥", q || productId || moduleId ? "No records match these filters." : "No stock has been given out yet.")
     }
     </div></div>
 
@@ -1005,7 +1243,10 @@ routes.dispatches = async (view, params) => {
     qTimer = setTimeout(() => updateFilter({ q: val }), 300);
   });
   $("#d-product", view).addEventListener("change", (e) =>
-    updateFilter({ productId: e.target.value }),
+    updateFilter({ productId: e.target.value, moduleId: "" }),
+  );
+  $("#d-module", view).addEventListener("change", (e) =>
+    updateFilter({ moduleId: e.target.value }),
   );
   const prevBtn = $("#prev", view);
   const nextBtn = $("#next", view);
@@ -1016,6 +1257,18 @@ routes.dispatches = async (view, params) => {
 
   view.querySelectorAll("[data-open]").forEach((b) =>
     b.addEventListener("click", () => dispatchModal(b.dataset.open)),
+  );
+  view.querySelectorAll("[data-pdf]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      b.disabled = true;
+      try {
+        await download(`/dispatches/${b.dataset.pdf}/pdf?download=1`, `warranty-card-${b.dataset.inv}.pdf`);
+      } catch (e) {
+        toast(e.message, "err");
+      } finally {
+        b.disabled = false;
+      }
+    }),
   );
   // Arriving from Give stock: show the record that was just saved.
   if (params.id) dispatchModal(params.id);
@@ -1035,40 +1288,48 @@ async function dispatchModal(id) {
         <div class="c"><div class="k">Customer</div><div class="v">${esc(d.customerName)}</div></div>
         <div class="c"><div class="k">Phone</div><div class="v mono">${esc(d.customerPhone)}</div></div>
         <div class="c"><div class="k">GST no</div><div class="v mono">${d.gstNo ? esc(d.gstNo) : "—"}</div></div>
-        <div class="c"><div class="k">Product</div><div class="v">${esc(d.productName)}</div></div>
         <div class="c"><div class="k">Given date</div><div class="v mono">${esc(d.givenDate)}</div></div>
         <div class="c"><div class="k">Valid until</div><div class="v mono">${d.validUntil ? esc(d.validUntil) : "—"}</div></div>
       </div>
       <div class="lab" style="font-size:12.5px;font-weight:600;color:var(--ink-soft);margin-bottom:6px">
-        ${d.quantity} unit${d.quantity === 1 ? "" : "s"} given</div>
-      <div class="pick-list">
+        ${d.quantity} unit${d.quantity === 1 ? "" : "s"} given${d.items.length > 1 ? ` across ${d.items.length} products` : ""}</div>
+      ${d.items
+        .map((i) => {
+          const units = d.units.filter((u) => u.moduleId === i.moduleId);
+          return `
+      <div class="item-h">${moduleCell(i)}<span class="muted">${i.quantity} unit${i.quantity === 1 ? "" : "s"}</span></div>
+      <div class="pick-list" style="margin-bottom:12px">
         ${
-          d.units.length
-            ? d.units
+          units.length
+            ? units
                 .map(
                   (u) => `<div class="pick-row" style="cursor:default">
                     ${serialPair(u.internalSerial, u.manufacturerSerial)}
                     <span class="d">${statusChip(u.status)}</span></div>`,
                 )
                 .join("")
-            : `<div class="muted" style="padding:14px">No units are linked to this record any more.</div>`
+            : `<div class="muted" style="padding:14px">No units are linked to this line any more.</div>`
         }
-      </div>
+      </div>`;
+        })
+        .join("")}
       ${d.notes ? `<div class="hint" style="margin-top:12px">Notes: ${esc(d.notes)}</div>` : ""}
       <div class="hint" style="margin-top:8px">Entered${d.createdByName ? " by " + esc(d.createdByName) : ""} on ${esc(new Date(d.createdAt).toLocaleString())}</div>`,
     footer: `
       ${isAdmin() ? `<button class="btn danger" data-del style="margin-right:auto">Undo &amp; return to stock</button>` : ""}
-      <button class="btn" data-cancel>Close</button>`,
+      <button class="btn" data-cancel>Close</button>
+      <button class="btn primary" data-pdf>⎙ PDF</button>`,
     onMount(root, close) {
       $("[data-cancel]", root).addEventListener("click", close);
+      $("[data-pdf]", root).addEventListener("click", () => pdfModal(d));
       const del = $("[data-del]", root);
       if (del)
         del.addEventListener("click", async () => {
-          if (!confirm(`Delete this record and put its sold units back in stock?`)) return;
+          if (!confirm(`Delete this record${d.items.length > 1 ? ` (all ${d.items.length} products)` : ""} and put its sold units back in stock?`)) return;
           try {
             await api("/dispatches/" + d.id, { method: "DELETE" });
             toast("Record deleted, units back in stock", "ok");
-            state.products = null;
+            stockChanged();
             close();
             go("dispatches");
             render();
@@ -1080,11 +1341,40 @@ async function dispatchModal(id) {
   });
 }
 
+// The blob URL behind the open PDF viewer; freed when the next one opens.
+let pdfUrl = null;
+
+/** View a hand-over's warranty card in a modal, with Download / Open in new tab. */
+async function pdfModal(d) {
+  let file;
+  try {
+    file = await fetchFile(`/dispatches/${d.id}/pdf`, `warranty-card-${d.invoiceNo}.pdf`);
+  } catch (e) {
+    return toast(e.message, "err");
+  }
+  if (pdfUrl) URL.revokeObjectURL(pdfUrl);
+  pdfUrl = URL.createObjectURL(file.blob);
+  openModal({
+    title: `Warranty card · ${d.invoiceNo}`,
+    wide: true,
+    body: `<iframe class="pdf-frame" src="${pdfUrl}" title="Warranty card PDF"></iframe>
+      <div class="hint">Can't see the PDF? Use “Open in new tab” or “Download”.</div>`,
+    footer: `
+      <button class="btn" data-back style="margin-right:auto">← Details</button>
+      <a class="btn" href="${pdfUrl}" target="_blank" rel="noopener">Open in new tab</a>
+      <a class="btn primary" href="${pdfUrl}" download="${esc(file.name)}">⤓ Download</a>`,
+    onMount(root) {
+      $("[data-back]", root).addEventListener("click", () => dispatchModal(d.id));
+    },
+  });
+}
+
 // ------------------------------------------------------------------ inventory
 routes.inventory = async (view, params) => {
-  const products = await loadProducts();
+  const [products, modules] = await Promise.all([loadProducts(), loadModules()]);
   const q = params.q || "";
   const productId = params.productId || "";
+  const moduleId = params.moduleId || "";
   const status = params.status || "";
   const limit = Number(params.limit) || 50;
   const offset = Number(params.offset) || 0;
@@ -1092,6 +1382,7 @@ routes.inventory = async (view, params) => {
   const qs = new URLSearchParams();
   if (q) qs.set("q", q);
   if (productId) qs.set("productId", productId);
+  if (moduleId) qs.set("moduleId", moduleId);
   if (status) qs.set("status", status);
   qs.set("limit", limit);
   qs.set("offset", offset);
@@ -1100,11 +1391,12 @@ routes.inventory = async (view, params) => {
   const exportQs = new URLSearchParams();
   if (q) exportQs.set("q", q);
   if (productId) exportQs.set("productId", productId);
+  if (moduleId) exportQs.set("moduleId", moduleId);
   if (status) exportQs.set("status", status);
 
   setHeader(
     "Inventory",
-    `${data.total} unit${data.total === 1 ? "" : "s"}${productId ? " · filtered by product" : ""}`,
+    `${data.total} unit${data.total === 1 ? "" : "s"}${moduleId ? " · filtered by module" : productId ? " · filtered by product" : ""}`,
     `<button class="btn" data-export>⤓ Export CSV</button>`,
     (a) =>
       a.querySelector("[data-export]").addEventListener("click", async (e) => {
@@ -1120,10 +1412,11 @@ routes.inventory = async (view, params) => {
   );
 
   const updateFilter = (patch) => {
-    const next = { q, productId, status, limit, offset: 0, ...patch };
+    const next = { q, productId, moduleId, status, limit, offset: 0, ...patch };
     const u = new URLSearchParams();
     if (next.q) u.set("q", next.q);
     if (next.productId) u.set("productId", next.productId);
+    if (next.moduleId) u.set("moduleId", next.moduleId);
     if (next.status) u.set("status", next.status);
     if (next.offset) u.set("offset", next.offset);
     location.hash = "#/inventory?" + u.toString();
@@ -1132,16 +1425,8 @@ routes.inventory = async (view, params) => {
   view.innerHTML = `
     <div class="toolbar">
       <div class="grow search"><span class="ic">⌕</span>
-        <input id="f-q" placeholder="Search serial, product, SKU…" value="${esc(q)}"></div>
-      <select id="f-product" style="width:auto">
-        <option value="">All products</option>
-        ${products
-          .map(
-            (p) =>
-              `<option value="${p.id}" ${p.id === productId ? "selected" : ""}>${esc(p.name)}</option>`,
-          )
-          .join("")}
-      </select>
+        <input id="f-q" placeholder="Search serial, product, module, SKU…" value="${esc(q)}"></div>
+      ${stockFilterHtml("f", products, modules, productId, moduleId)}
       <select id="f-status" style="width:auto">
         <option value="">All statuses</option>
         ${STATUSES.map(
@@ -1155,14 +1440,14 @@ routes.inventory = async (view, params) => {
     ${
       data.items.length
         ? `<table>
-        <thead><tr><th>Internal ← Supplier</th><th>Product</th><th>Status</th><th>Intake</th><th></th></tr></thead>
+        <thead><tr><th>Internal ← Supplier</th><th>Product / module</th><th>Status</th><th>Intake</th><th></th></tr></thead>
         <tbody>
           ${data.items
             .map(
               (u) => `
             <tr>
               <td>${serialPair(u.internalSerial, u.manufacturerSerial)}</td>
-              <td><b>${esc(u.productName)}</b><div class="muted mono" style="font-size:12px">${esc(u.sku)}</div></td>
+              <td>${moduleCell(u)}</td>
               <td>
                 <select class="st" data-id="${u.id}" style="width:auto;padding:5px 8px">
                   ${STATUSES.map(
@@ -1199,7 +1484,10 @@ routes.inventory = async (view, params) => {
     qTimer = setTimeout(() => updateFilter({ q: val }), 300);
   });
   $("#f-product", view).addEventListener("change", (e) =>
-    updateFilter({ productId: e.target.value }),
+    updateFilter({ productId: e.target.value, moduleId: "" }),
+  );
+  $("#f-module", view).addEventListener("change", (e) =>
+    updateFilter({ moduleId: e.target.value }),
   );
   $("#f-status", view).addEventListener("change", (e) =>
     updateFilter({ status: e.target.value }),
@@ -1224,7 +1512,7 @@ routes.inventory = async (view, params) => {
           body: JSON.stringify({ status: s.value }),
         });
         toast("Status updated", "ok");
-        state.products = null; // counts changed
+        stockChanged();
       } catch (e) {
         toast(e.message, "err");
         render();
@@ -1256,6 +1544,7 @@ function unitModal(u, onSaved) {
       </div>
       <div class="cert-grid" style="border-radius:10px;border:1px solid var(--line);margin-bottom:16px">
         <div class="c"><div class="k">Product</div><div class="v">${esc(u.productName)}</div></div>
+        <div class="c"><div class="k">Module</div><div class="v">${esc(u.moduleName)}</div></div>
         <div class="c"><div class="k">SKU</div><div class="v mono">${esc(u.sku)}</div></div>
         <div class="c"><div class="k">Status</div><div class="v">${statusChip(u.status)}</div></div>
         <div class="c"><div class="k">Intake date</div><div class="v mono">${esc(u.intakeDate)}</div></div>
@@ -1337,6 +1626,7 @@ routes.warranty = async (view, params) => {
           <div class="cert-top">
             <div class="t">Warranty certificate · matched ${data.matchedBy} serial</div>
             <div class="n">${esc(u.productName)}</div>
+            <div style="opacity:.8;margin-top:2px">${esc(u.moduleName)}</div>
             <div style="margin-top:12px">${serialPair(u.internalSerial, u.manufacturerSerial)}</div>
           </div>
           <div class="cert-grid">
@@ -1363,7 +1653,7 @@ routes.warranty = async (view, params) => {
                    .map(
                      (s) =>
                        `<tr><td>${serialPair(s.internalSerial, s.manufacturerSerial)}</td>
-                        <td class="muted" style="text-align:right">${esc(s.productName)}</td></tr>`,
+                        <td class="muted" style="text-align:right">${esc(s.productName)} · ${esc(s.moduleName)}</td></tr>`,
                    )
                    .join("")}
                </tbody></table></div></div>`
@@ -1406,14 +1696,14 @@ routes.settings = async (view) => {
 
     <div class="panel"><div class="panel-h"><h2>Sample data</h2></div>
       <div class="panel-b">
-        <p class="muted" style="margin-top:0">Create two demo products with stock so you can click around.</p>
+        <p class="muted" style="margin-top:0">Create a demo product with two modules and some stock so you can click around.</p>
         <button class="btn" id="s-sample-btn">Load sample data</button>
       </div>
     </div>
 
     <div class="panel" style="border-color:#F0C9C9"><div class="panel-h"><h2 style="color:var(--err-ink)">Danger zone</h2></div>
       <div class="panel-b">
-        <p class="muted" style="margin-top:0">Delete every product and unit. This cannot be undone.</p>
+        <p class="muted" style="margin-top:0">Delete every product, module and unit. This cannot be undone.</p>
         <button class="btn danger" id="s-clear">Delete all data</button>
       </div>
     </div>`;
@@ -1446,37 +1736,30 @@ routes.settings = async (view) => {
     e.target.disabled = true;
     e.target.textContent = "Loading…";
     try {
-      const a = await api("/products", {
-        method: "POST",
-        body: JSON.stringify({
-          name: "VLD1030 Module",
-          sku: "VLD1030",
-          warrantyMonths: 24,
-          description: "Demo product",
-        }),
+      const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body) });
+      const kit = await post("/products", {
+        name: "VLD Reader Kit",
+        description: "Demo product",
       });
-      await api("/units/intake", {
-        method: "POST",
-        body: JSON.stringify({
-          productId: a.id,
-          manufacturerSerials: ["SNA-5001", "SNA-5002", "SNA-5003", "SNA-5004"],
-        }),
+      const a = await post("/modules", {
+        productId: kit.id,
+        name: "VLD1030 Module",
+        sku: "VLD1030",
+        warrantyMonths: 24,
       });
-      const b = await api("/products", {
-        method: "POST",
-        body: JSON.stringify({
-          name: "VLD2040 Reader",
-          sku: "VLD2040",
-          warrantyMonths: 12,
-          description: "Demo product",
-        }),
+      await post("/units/intake", {
+        moduleId: a.id,
+        manufacturerSerials: ["SNA-5001", "SNA-5002", "SNA-5003", "SNA-5004"],
       });
-      await api("/units/intake", {
-        method: "POST",
-        body: JSON.stringify({ productId: b.id, quantity: 6 }),
+      const b = await post("/modules", {
+        productId: kit.id,
+        name: "VLD2040 Reader",
+        sku: "VLD2040",
+        warrantyMonths: 12,
       });
+      await post("/units/intake", { moduleId: b.id, quantity: 6 });
       toast("Sample data loaded", "ok");
-      await loadProducts(true);
+      stockChanged();
       go("dashboard");
     } catch (err) {
       toast(err.message, "err");
@@ -1486,13 +1769,16 @@ routes.settings = async (view) => {
   });
 
   $("#s-clear", view).addEventListener("click", async () => {
-    if (!confirm("Delete ALL products and units? This cannot be undone.")) return;
+    if (!confirm("Delete ALL products, modules and units? This cannot be undone.")) return;
     try {
-      const products = await api("/products");
-      for (const p of products) {
+      // Modules first (taking their units): a product can't be deleted while it has any.
+      for (const m of await api("/modules")) {
+        await api("/modules/" + m.id, { method: "DELETE" });
+      }
+      for (const p of await api("/products")) {
         await api("/products/" + p.id, { method: "DELETE" });
       }
-      state.products = null;
+      stockChanged();
       toast("All data deleted", "ok");
       go("dashboard");
     } catch (e) {
@@ -1722,7 +2008,7 @@ function signedOut(message) {
   setToken(null);
   state.user = null;
   state.settings = null;
-  state.products = null;
+  stockChanged();
   showLogin(message);
 }
 

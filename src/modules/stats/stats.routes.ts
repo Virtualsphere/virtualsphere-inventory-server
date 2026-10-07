@@ -4,7 +4,7 @@ import { getStats } from "./stats.repo";
 
 export const statsRoutes = Router();
 
-// GET /api/stats   (dashboard totals + low-stock products)
+// GET /api/stats   (dashboard totals + low-stock modules)
 statsRoutes.get(
   "/",
   asyncHandler(async (_req, res) => {

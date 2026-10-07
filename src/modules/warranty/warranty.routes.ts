@@ -31,6 +31,7 @@ warrantyRoutes.get(
           internalSerial: s.internalSerial,
           manufacturerSerial: s.manufacturerSerial,
           productName: s.productName,
+          moduleName: s.moduleName,
           sku: s.sku,
           status: s.status,
         })),

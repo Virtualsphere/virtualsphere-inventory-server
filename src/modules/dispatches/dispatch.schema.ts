@@ -8,9 +8,38 @@ const isoDate = z
 /** Indian GSTIN: 2-digit state code, PAN, entity number, 'Z', checksum. */
 const GSTIN = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
 
+/** Most lines one hand-over may have (each line is one module). */
+const MAX_ITEMS = 100;
+
 /**
- * Give stock to a customer. Choose the units either by id (`unitIds`, e.g.
- * picked by serial) or by `quantity` (the oldest in-stock units go first).
+ * One line of a hand-over: a module and which of its units go out — either by
+ * id (`unitIds`, e.g. picked by serial) or by `quantity` (oldest first).
+ */
+const dispatchItemSchema = z
+  .object({
+    moduleId: z.string().uuid(),
+    unitIds: z.array(z.string().uuid()).min(1).max(config.maxIntakeBatch).optional(),
+    quantity: z.number().int().min(1).max(config.maxIntakeBatch).optional(),
+  })
+  .superRefine((val, ctx) => {
+    if (!val.unitIds && val.quantity === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Select the units to give, or a quantity",
+      });
+    }
+    if (val.unitIds && new Set(val.unitIds).size !== val.unitIds.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["unitIds"],
+        message: "The same unit is selected twice",
+      });
+    }
+  });
+
+/**
+ * Give stock to a customer: one invoice, customer, given date and validity,
+ * and one or more modules (`items`). Saved as one record with a line per item.
  */
 export const createDispatchSchema = z
   .object({
@@ -28,27 +57,15 @@ export const createDispatchSchema = z
       .nullish()
       .transform((s) => (s ? s : null))
       .refine((s) => s === null || GSTIN.test(s), "Enter a valid 15-character GSTIN"),
-    productId: z.string().uuid(),
-    unitIds: z.array(z.string().uuid()).min(1).max(config.maxIntakeBatch).optional(),
-    quantity: z.number().int().min(1).max(config.maxIntakeBatch).optional(),
     givenDate: isoDate,
     validUntil: isoDate.nullish().transform((s) => s ?? null),
     notes: z.string().trim().max(2000).optional().default(""),
+    items: z
+      .array(dispatchItemSchema)
+      .min(1, "Add at least one product to give")
+      .max(MAX_ITEMS),
   })
   .superRefine((val, ctx) => {
-    if (!val.unitIds && val.quantity === undefined) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: "Select the units to give, or a quantity",
-      });
-    }
-    if (val.unitIds && new Set(val.unitIds).size !== val.unitIds.length) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["unitIds"],
-        message: "The same unit is selected twice",
-      });
-    }
     if (val.validUntil && val.validUntil < val.givenDate) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -56,14 +73,35 @@ export const createDispatchSchema = z
         message: "Validity date can't be before the given date",
       });
     }
+    const modules = val.items.map((i) => i.moduleId);
+    if (new Set(modules).size !== modules.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["items"],
+        message: "The same module is added twice — combine those lines",
+      });
+    }
+    const total = val.items.reduce(
+      (n, i) => n + (i.unitIds?.length ?? i.quantity ?? 0),
+      0,
+    );
+    if (total > config.maxIntakeBatch) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["items"],
+        message: `At most ${config.maxIntakeBatch} units in one hand-over`,
+      });
+    }
   });
 
 export const listDispatchesSchema = z.object({
   q: z.string().trim().max(128).optional(),
+  moduleId: z.string().uuid().optional(),
   productId: z.string().uuid().optional(),
   limit: z.coerce.number().int().min(1).max(500).optional().default(50),
   offset: z.coerce.number().int().min(0).optional().default(0),
 });
 
 export type CreateDispatchInput = z.infer<typeof createDispatchSchema>;
+export type DispatchItemInput = CreateDispatchInput["items"][number];
 export type ListDispatchesInput = z.infer<typeof listDispatchesSchema>;

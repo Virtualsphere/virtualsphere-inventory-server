@@ -4,6 +4,7 @@ import { getSettings } from "../settings/settings.repo";
 
 export interface StatsTotals {
   products: number;
+  modules: number;
   units: number;
   inStock: number;
   sold: number;
@@ -11,17 +12,19 @@ export interface StatsTotals {
   defective: number;
 }
 
-export interface LowStockProduct {
+/** A module at or below the low-stock threshold. */
+export interface LowStockModule {
   id: string;
   name: string;
   sku: string;
+  productName: string;
   inStock: number;
 }
 
 export interface Stats {
   totals: StatsTotals;
   lowStockThreshold: number;
-  lowStock: LowStockProduct[];
+  lowStock: LowStockModule[];
 }
 
 export async function getStats(): Promise<Stats> {
@@ -32,6 +35,7 @@ export async function getStats(): Promise<Stats> {
   const [totalsRows] = await pool.query<RowDataPacket[]>(
     `SELECT
        (SELECT COUNT(*) FROM products)                                AS products,
+       (SELECT COUNT(*) FROM modules)                                 AS modules,
        COUNT(*)                                                       AS units,
        CAST(COALESCE(SUM(status = 'in_stock'), 0)  AS SIGNED)         AS in_stock,
        CAST(COALESCE(SUM(status = 'sold'), 0)      AS SIGNED)         AS sold,
@@ -41,6 +45,7 @@ export async function getStats(): Promise<Stats> {
   );
   const t = totalsRows[0] as {
     products: number;
+    modules: number;
     units: number;
     in_stock: number;
     sold: number;
@@ -49,13 +54,14 @@ export async function getStats(): Promise<Stats> {
   };
 
   const [lowRows] = await pool.query<RowDataPacket[]>(
-    `SELECT p.id, p.name, p.sku,
+    `SELECT m.id, m.name, m.sku, p.name AS product_name,
             CAST(COALESCE(SUM(u.status = 'in_stock'), 0) AS SIGNED) AS in_stock
-     FROM products p
-     LEFT JOIN units u ON u.product_id = p.id
-     GROUP BY p.id
+     FROM modules m
+     JOIN products p ON p.id = m.product_id
+     LEFT JOIN units u ON u.module_id = m.id
+     GROUP BY m.id
      HAVING in_stock <= ?
-     ORDER BY in_stock ASC, p.name ASC
+     ORDER BY in_stock ASC, p.name ASC, m.name ASC
      LIMIT 50`,
     [settings.lowStockThreshold],
   );
@@ -63,12 +69,14 @@ export async function getStats(): Promise<Stats> {
     id: string;
     name: string;
     sku: string;
+    product_name: string;
     in_stock: number;
   }>;
 
   return {
     totals: {
       products: t.products,
+      modules: t.modules,
       units: t.units,
       inStock: t.in_stock,
       sold: t.sold,
@@ -80,6 +88,7 @@ export async function getStats(): Promise<Stats> {
       id: r.id,
       name: r.name,
       sku: r.sku,
+      productName: r.product_name,
       inStock: r.in_stock,
     })),
   };

@@ -8,6 +8,7 @@ import { requireAuth } from "./middleware/auth";
 import { authRoutes } from "./modules/auth/auth.routes";
 import { userRoutes } from "./modules/users/user.routes";
 import { productRoutes } from "./modules/products/product.routes";
+import { moduleRoutes } from "./modules/modules/module.routes";
 import { unitRoutes } from "./modules/units/unit.routes";
 import { dispatchRoutes } from "./modules/dispatches/dispatch.routes";
 import { warrantyRoutes } from "./modules/warranty/warranty.routes";
@@ -39,6 +40,7 @@ export function createApp() {
 
   app.use("/api/users", userRoutes);
   app.use("/api/products", productRoutes);
+  app.use("/api/modules", moduleRoutes);
   app.use("/api/units", unitRoutes);
   app.use("/api/dispatches", dispatchRoutes);
   app.use("/api/warranty", warrantyRoutes);

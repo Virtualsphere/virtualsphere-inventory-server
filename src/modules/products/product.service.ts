@@ -1,6 +1,5 @@
 import { conflict, isUniqueViolation as isUnique, notFound } from "../../lib/errors";
 import type { Product, ProductWithCounts } from "../../types";
-import { getSettings } from "../settings/settings.repo";
 import {
   deleteProductRow,
   findProductById,
@@ -14,20 +13,19 @@ import type {
   UpdateProductInput,
 } from "./product.schema";
 
+/** MySQL: cannot delete a parent row, a foreign key restricts it (errno 1451). */
+const ROW_IS_REFERENCED = "ER_ROW_IS_REFERENCED_2";
+
 export async function createProduct(
   input: CreateProductInput,
 ): Promise<Product> {
-  const settings = await getSettings();
   try {
     return await insertProduct({
       name: input.name,
-      sku: input.sku,
       description: input.description,
-      warrantyMonths: input.warrantyMonths ?? settings.defaultWarrantyMonths,
-      serialPrefix: input.serialPrefix ?? null,
     });
   } catch (err) {
-    if (isUnique(err)) throw conflict(`SKU "${input.sku}" is already in use`);
+    if (isUnique(err)) throw conflict(`Product "${input.name}" already exists`);
     throw err;
   }
 }
@@ -51,24 +49,27 @@ export async function updateProduct(
 
   const columns: Record<string, unknown> = {};
   if (patch.name !== undefined) columns["name"] = patch.name;
-  if (patch.sku !== undefined) columns["sku"] = patch.sku;
   if (patch.description !== undefined) columns["description"] = patch.description;
-  if (patch.warrantyMonths !== undefined)
-    columns["warranty_months"] = patch.warrantyMonths;
-  if (patch.serialPrefix !== undefined)
-    columns["serial_prefix"] = patch.serialPrefix;
 
   try {
     const updated = await updateProductRow(id, columns);
     if (!updated) throw notFound("Product");
     return updated;
   } catch (err) {
-    if (isUnique(err)) throw conflict(`SKU "${patch.sku}" is already in use`);
+    if (isUnique(err)) throw conflict(`Product "${patch.name}" already exists`);
     throw err;
   }
 }
 
+/** Only an empty product can be deleted: its modules must be deleted or moved first. */
 export async function deleteProduct(id: string): Promise<void> {
-  const ok = await deleteProductRow(id);
-  if (!ok) throw notFound("Product");
+  try {
+    const ok = await deleteProductRow(id);
+    if (!ok) throw notFound("Product");
+  } catch (err) {
+    if ((err as { code?: string } | null)?.code === ROW_IS_REFERENCED) {
+      throw conflict("This product still has modules. Delete or move them first.");
+    }
+    throw err;
+  }
 }

@@ -2,7 +2,7 @@
  * Editable serials: intake overrides for internal serials, generated serials
  * skipping ones already taken by a hand-edited unit, and PATCHing either
  * serial afterwards. Like the concurrency test, this needs TEST_DB_NAME and
- * wipes products/units in that database.
+ * wipes products/modules/units in that database.
  */
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
@@ -20,7 +20,7 @@ describe.skipIf(!TEST_DB)("editable serials", () => {
   let pool: Pool;
   let svc: typeof import("../src/modules/units/unit.service");
   let schema: typeof import("../src/modules/units/unit.schema");
-  let productId: string;
+  let moduleId: string;
 
   beforeAll(async () => {
     const { runMigrations } = await import("../src/db/migrate");
@@ -31,13 +31,16 @@ describe.skipIf(!TEST_DB)("editable serials", () => {
     schema = await import("../src/modules/units/unit.schema");
 
     await pool.query("DELETE FROM units");
+    await pool.query("DELETE FROM modules");
     await pool.query("DELETE FROM products");
 
-    productId = randomUUID();
+    const productId = randomUUID();
+    await pool.query("INSERT INTO products (id, name) VALUES (?, 'Serial Product')", [productId]);
+    moduleId = randomUUID();
     await pool.query(
-      `INSERT INTO products (id, name, sku, warranty_months)
-       VALUES (?, 'Serial Widget', 'SW1', 12)`,
-      [productId],
+      `INSERT INTO modules (id, product_id, name, sku, warranty_months)
+       VALUES (?, ?, 'Serial Widget', 'SW1', 12)`,
+      [moduleId, productId],
     );
   });
 
@@ -46,7 +49,7 @@ describe.skipIf(!TEST_DB)("editable serials", () => {
   });
 
   const intake = (body: Record<string, unknown>) =>
-    svc.intake(schema.intakeSchema.parse({ productId, ...body }));
+    svc.intake(schema.intakeSchema.parse({ moduleId, ...body }));
 
   it("uses an overridden internal serial and generates the rest", async () => {
     const r = await intake({ quantity: 3, internalSerials: [null, "CUSTOM-1"] });
@@ -83,7 +86,7 @@ describe.skipIf(!TEST_DB)("editable serials", () => {
 
   it("rejects more supplier serials than the quantity", () => {
     expect(() =>
-      schema.intakeSchema.parse({ productId, quantity: 1, manufacturerSerials: ["A", "B"] }),
+      schema.intakeSchema.parse({ moduleId, quantity: 1, manufacturerSerials: ["A", "B"] }),
     ).toThrow(/More manufacturer serials than the quantity/);
   });
 
@@ -96,7 +99,7 @@ describe.skipIf(!TEST_DB)("editable serials", () => {
   it("rejects duplicate overrides within a batch", () => {
     expect(() =>
       schema.intakeSchema.parse({
-        productId,
+        moduleId,
         quantity: 2,
         internalSerials: ["X-1", "x-1"],
       }),

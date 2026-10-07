@@ -24,7 +24,7 @@ const optionalSerial = z
   .transform((s) => (s ? s : null));
 
 /**
- * Intake: add units to a product. Two modes —
+ * Intake: add units to a module. Two modes —
  *  - `manufacturerSerials` only: one supplier serial per unit (count = array
  *    length); every entry must be present
  *  - `quantity`: N units. `manufacturerSerials` may also be sent, then it
@@ -35,7 +35,7 @@ const optionalSerial = z
  */
 export const intakeSchema = z
   .object({
-    productId: z.string().uuid(),
+    moduleId: z.string().uuid(),
     manufacturerSerials: z.array(optionalSerial).optional(),
     quantity: z.number().int().min(1).max(config.maxIntakeBatch).optional(),
     internalSerials: z.array(optionalSerial).optional(),
@@ -121,6 +121,7 @@ export const updateUnitSchema = z
 /** Query params for listing units. */
 export const listUnitsSchema = z.object({
   q: z.string().trim().max(128).optional(),
+  moduleId: z.string().uuid().optional(),
   productId: z.string().uuid().optional(),
   status: unitStatusSchema.optional(),
   limit: z.coerce.number().int().min(1).max(500).optional().default(50),
