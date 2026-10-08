@@ -6,6 +6,7 @@ import { requireAdmin } from "../../middleware/auth";
 import {
   createDispatchSchema,
   listDispatchesSchema,
+  updateDispatchSchema,
 } from "./dispatch.schema";
 import {
   createDispatch,
@@ -13,6 +14,7 @@ import {
   getDispatch,
   getDispatchPdf,
   listDispatchesPaged,
+  updateDispatch,
 } from "./dispatch.service";
 
 export const dispatchRoutes = Router();
@@ -44,6 +46,16 @@ dispatchRoutes.get(
   asyncHandler(async (req, res) => {
     const { id } = parse(idParam, req.params);
     res.json(await getDispatch(id));
+  }),
+);
+
+// PATCH /api/dispatches/:id   (fix invoice, customer, phone, GSTIN, dates, notes)
+dispatchRoutes.patch(
+  "/:id",
+  asyncHandler(async (req, res) => {
+    const { id } = parse(idParam, req.params);
+    const patch = parse(updateDispatchSchema, req.body);
+    res.json(await updateDispatch(id, patch));
   }),
 );
 

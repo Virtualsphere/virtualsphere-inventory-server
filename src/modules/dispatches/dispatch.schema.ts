@@ -37,29 +37,35 @@ const dispatchItemSchema = z
     }
   });
 
+/** The hand-over's own fields, shared by create and edit. */
+const headerFields = {
+  invoiceNo: z.string().trim().min(1, "Invoice number is required").max(64),
+  customerName: z.string().trim().min(1, "Customer name is required").max(200),
+  customerPhone: z
+    .string()
+    .trim()
+    .regex(/^\+?[0-9][0-9 -]{5,18}$/, "Enter a valid phone number"),
+  // Blank means the customer has no GSTIN (unregistered / B2C).
+  gstNo: z
+    .string()
+    .trim()
+    .toUpperCase()
+    .nullish()
+    .transform((s) => (s ? s : null))
+    .refine((s) => s === null || GSTIN.test(s), "Enter a valid 15-character GSTIN"),
+  givenDate: isoDate,
+  validUntil: isoDate.nullish().transform((s) => s ?? null),
+  notes: z.string().trim().max(2000),
+};
+
 /**
  * Give stock to a customer: one invoice, customer, given date and validity,
  * and one or more modules (`items`). Saved as one record with a line per item.
  */
 export const createDispatchSchema = z
   .object({
-    invoiceNo: z.string().trim().min(1, "Invoice number is required").max(64),
-    customerName: z.string().trim().min(1, "Customer name is required").max(200),
-    customerPhone: z
-      .string()
-      .trim()
-      .regex(/^\+?[0-9][0-9 -]{5,18}$/, "Enter a valid phone number"),
-    // Blank means the customer has no GSTIN (unregistered / B2C).
-    gstNo: z
-      .string()
-      .trim()
-      .toUpperCase()
-      .nullish()
-      .transform((s) => (s ? s : null))
-      .refine((s) => s === null || GSTIN.test(s), "Enter a valid 15-character GSTIN"),
-    givenDate: isoDate,
-    validUntil: isoDate.nullish().transform((s) => s ?? null),
-    notes: z.string().trim().max(2000).optional().default(""),
+    ...headerFields,
+    notes: headerFields.notes.optional().default(""),
     items: z
       .array(dispatchItemSchema)
       .min(1, "Add at least one product to give")
@@ -94,6 +100,16 @@ export const createDispatchSchema = z
     }
   });
 
+/**
+ * PATCH a hand-over's details (not its lines or units). All fields optional;
+ * at least one required. The validity check against the given date happens
+ * in the service, since either date may come from the stored record.
+ */
+export const updateDispatchSchema = z
+  .object(headerFields)
+  .partial()
+  .refine((o) => Object.keys(o).length > 0, { message: "No fields to update" });
+
 export const listDispatchesSchema = z.object({
   q: z.string().trim().max(128).optional(),
   moduleId: z.string().uuid().optional(),
@@ -103,5 +119,6 @@ export const listDispatchesSchema = z.object({
 });
 
 export type CreateDispatchInput = z.infer<typeof createDispatchSchema>;
+export type UpdateDispatchInput = z.infer<typeof updateDispatchSchema>;
 export type DispatchItemInput = CreateDispatchInput["items"][number];
 export type ListDispatchesInput = z.infer<typeof listDispatchesSchema>;

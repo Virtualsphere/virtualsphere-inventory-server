@@ -192,6 +192,38 @@ describe.skipIf(!TEST_DB)("give stock (dispatches)", () => {
     expect(await inStock()).toBe(before - ids.length);
   });
 
+  it("edits a hand-over's details and its sold units follow", async () => {
+    const d = await give({ quantity: 1, gstNo: "27AAPFU0939F1ZV", validUntil: "2027-10-06" });
+    const edit = (body: Record<string, unknown>) =>
+      svc.updateDispatch(d.id, schema.updateDispatchSchema.parse(body));
+
+    const e = await edit({
+      invoiceNo: "INV-FIXED",
+      customerName: "Verma Traders",
+      customerPhone: "9123456780",
+      gstNo: "",
+      validUntil: "2028-01-31",
+    });
+    expect(e).toMatchObject({
+      invoiceNo: "INV-FIXED",
+      customerName: "Verma Traders",
+      customerPhone: "9123456780",
+      gstNo: null,
+      givenDate: "2026-10-06",
+      validUntil: "2028-01-31",
+      quantity: 1,
+    });
+    expect(e.units.every((u) => u.soldTo === "Verma Traders")).toBe(true);
+
+    // Validity is checked against the stored given date too.
+    await expect(edit({ validUntil: "2026-01-01" })).rejects.toThrow(/before the given date/);
+    expect(schema.updateDispatchSchema.safeParse({}).success).toBe(false);
+    expect(schema.updateDispatchSchema.safeParse({ gstNo: "123" }).success).toBe(false);
+    // Fields left out are kept.
+    expect((await edit({ notes: "fixed typo" })).invoiceNo).toBe("INV-FIXED");
+    await svc.deleteDispatch(d.id);
+  });
+
   it("renders a warranty card PDF for a hand-over", async () => {
     const d = await give({ quantity: 1, invoiceNo: "INV/PDF 1" });
     const { filename, pdf } = await svc.getDispatchPdf(d.id);

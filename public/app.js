@@ -1318,9 +1318,11 @@ async function dispatchModal(id) {
     footer: `
       ${isAdmin() ? `<button class="btn danger" data-del style="margin-right:auto">Undo &amp; return to stock</button>` : ""}
       <button class="btn" data-cancel>Close</button>
+      <button class="btn" data-edit>✎ Edit</button>
       <button class="btn primary" data-pdf>⎙ PDF</button>`,
     onMount(root, close) {
       $("[data-cancel]", root).addEventListener("click", close);
+      $("[data-edit]", root).addEventListener("click", () => editDispatchModal(d));
       $("[data-pdf]", root).addEventListener("click", () => pdfModal(d));
       const del = $("[data-del]", root);
       if (del)
@@ -1337,6 +1339,84 @@ async function dispatchModal(id) {
             toast(e.message, "err");
           }
         });
+    },
+  });
+}
+
+/** Correct a hand-over's details; its products and units stay as they are. */
+function editDispatchModal(d) {
+  openModal({
+    title: `Edit invoice ${d.invoiceNo}`,
+    body: `
+      <label class="field"><span class="lab">Customer name</span>
+        <input id="e-name" maxlength="200" value="${esc(d.customerName)}"></label>
+      <div class="row">
+        <label class="field"><span class="lab">Customer phone</span>
+          <input id="e-phone" type="tel" maxlength="20" value="${esc(d.customerPhone)}"></label>
+        <label class="field"><span class="lab">GST no <span class="muted">(optional)</span></span>
+          <input id="e-gst" class="mono" maxlength="15" value="${esc(d.gstNo || "")}"
+            style="text-transform:uppercase"></label>
+      </div>
+      <div class="row">
+        <label class="field"><span class="lab">Invoice no</span>
+          <input id="e-inv" class="mono" maxlength="64" value="${esc(d.invoiceNo)}"></label>
+        <label class="field"><span class="lab">Given date</span>
+          <input id="e-date" type="date" value="${esc(d.givenDate)}"></label>
+      </div>
+      <div class="row">
+        <label class="field"><span class="lab">Validity date</span>
+          <input id="e-valid" type="date" value="${esc(d.validUntil || "")}"></label>
+        <label class="field"><span class="lab">Notes <span class="muted">(optional)</span></span>
+          <input id="e-notes" maxlength="2000" value="${esc(d.notes)}"></label>
+      </div>
+      <div class="hint">Products and serials can't be changed here — undo the record and give the stock again for that.</div>
+      <div class="banner err" id="e-err" hidden></div>`,
+    footer: `
+      <button class="btn" data-back style="margin-right:auto">← Details</button>
+      <button class="btn primary" data-save>Save</button>`,
+    onMount(root) {
+      $("[data-back]", root).addEventListener("click", () => dispatchModal(d.id));
+      $("[data-save]", root).addEventListener("click", async (e) => {
+        const errEl = $("#e-err", root);
+        const fail = (m) => {
+          errEl.textContent = m;
+          errEl.hidden = !m;
+        };
+        fail("");
+        const next = {
+          customerName: $("#e-name", root).value.trim(),
+          customerPhone: $("#e-phone", root).value.trim(),
+          gstNo: $("#e-gst", root).value.trim().toUpperCase() || null,
+          invoiceNo: $("#e-inv", root).value.trim(),
+          givenDate: $("#e-date", root).value,
+          validUntil: $("#e-valid", root).value || null,
+          notes: $("#e-notes", root).value.trim(),
+        };
+        if (!next.customerName) return fail("Enter the customer name.");
+        if (!next.customerPhone) return fail("Enter the customer phone.");
+        if (!next.invoiceNo) return fail("Enter the invoice number.");
+        if (!next.givenDate) return fail("Enter the given date.");
+        if (next.validUntil && next.validUntil < next.givenDate) {
+          return fail("Validity date can't be before the given date.");
+        }
+        // Send only what changed.
+        const patch = {};
+        for (const [k, v] of Object.entries(next)) {
+          if (v !== (d[k] ?? null)) patch[k] = v;
+        }
+        if (!Object.keys(patch).length) return dispatchModal(d.id);
+        e.target.disabled = true;
+        try {
+          await api("/dispatches/" + d.id, { method: "PATCH", body: JSON.stringify(patch) });
+          toast("Record updated", "ok");
+          stockChanged();
+          dispatchModal(d.id);
+          if (currentRoute === "dispatches") render();
+        } catch (ex) {
+          fail(validationMessage(ex));
+          e.target.disabled = false;
+        }
+      });
     },
   });
 }

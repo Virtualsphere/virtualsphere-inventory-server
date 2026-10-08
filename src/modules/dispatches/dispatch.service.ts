@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { type PoolConnection, withTransaction } from "../../db/pool";
-import { conflict, notFound } from "../../lib/errors";
+import { badRequest, conflict, notFound } from "../../lib/errors";
 import type { DispatchDetail } from "../../types";
 import { getSettings } from "../settings/settings.repo";
 import { listUnitsByDispatch } from "../units/unit.repo";
@@ -12,11 +12,13 @@ import {
   insertDispatchItem,
   listDispatches,
   type ListDispatchesResult,
+  updateDispatchRow,
 } from "./dispatch.repo";
 import type {
   CreateDispatchInput,
   DispatchItemInput,
   ListDispatchesInput,
+  UpdateDispatchInput,
 } from "./dispatch.schema";
 
 interface LockedUnitRow extends RowDataPacket {
@@ -141,6 +143,44 @@ export async function getDispatch(id: string): Promise<DispatchDetail> {
   const dispatch = await findDispatchById(id);
   if (!dispatch) throw notFound("Dispatch");
   return { ...dispatch, units: await listUnitsByDispatch(id) };
+}
+
+/**
+ * Correct a hand-over's details (invoice, customer, GSTIN, dates, notes).
+ * Its lines and units stay as they are, except that the units still marked
+ * sold under it follow a changed customer name / given date.
+ */
+export async function updateDispatch(
+  id: string,
+  patch: UpdateDispatchInput,
+): Promise<DispatchDetail> {
+  await withTransaction(async (conn) => {
+    const [rows] = await conn.query<RowDataPacket[]>(
+      "SELECT given_date, valid_until FROM dispatches WHERE id = ? FOR UPDATE",
+      [id],
+    );
+    const existing = rows[0];
+    if (!existing) throw notFound("Dispatch");
+
+    const givenDate = patch.givenDate ?? existing["given_date"];
+    const validUntil =
+      patch.validUntil !== undefined ? patch.validUntil : existing["valid_until"];
+    if (validUntil && validUntil < givenDate) {
+      throw badRequest("Validity date can't be before the given date");
+    }
+
+    await updateDispatchRow(conn, id, patch);
+    if (patch.customerName !== undefined || patch.givenDate !== undefined) {
+      await conn.query(
+        `UPDATE units
+         SET sold_to = COALESCE(?, sold_to), sold_date = COALESCE(?, sold_date),
+             updated_at = NOW(3)
+         WHERE dispatch_id = ? AND status = 'sold'`,
+        [patch.customerName ?? null, patch.givenDate ?? null, id],
+      );
+    }
+  });
+  return getDispatch(id);
 }
 
 /** The warranty card PDF for one hand-over, with a filename safe for a header. */

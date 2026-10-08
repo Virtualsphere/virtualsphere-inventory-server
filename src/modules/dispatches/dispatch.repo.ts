@@ -120,6 +120,41 @@ export async function insertDispatch(
   );
 }
 
+const UPDATABLE_COLUMNS = {
+  invoiceNo: "invoice_no",
+  customerName: "customer_name",
+  customerPhone: "customer_phone",
+  gstNo: "gst_no",
+  givenDate: "given_date",
+  validUntil: "valid_until",
+  notes: "notes",
+} as const;
+
+export type DispatchPatch = Partial<
+  Pick<InsertableDispatch, keyof typeof UPDATABLE_COLUMNS>
+>;
+
+/** Write the given header fields of one hand-over; fields left out are kept. */
+export async function updateDispatchRow(
+  conn: Queryable,
+  id: string,
+  patch: DispatchPatch,
+): Promise<void> {
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  for (const [key, column] of Object.entries(UPDATABLE_COLUMNS)) {
+    const value = patch[key as keyof DispatchPatch];
+    if (value === undefined) continue;
+    sets.push(`${column} = ?`);
+    params.push(value);
+  }
+  if (sets.length === 0) return;
+  await conn.query(`UPDATE dispatches SET ${sets.join(", ")} WHERE id = ?`, [
+    ...params,
+    id,
+  ]);
+}
+
 export async function insertDispatchItem(
   conn: Queryable,
   dispatchId: string,
