@@ -2,6 +2,7 @@ import { conflict, isUniqueViolation as isUnique, notFound } from "../../lib/err
 import type { Module, ModuleWithCounts } from "../../types";
 import { getSettings } from "../settings/settings.repo";
 import { findProductById } from "../products/product.repo";
+import { syncNextSeq } from "../units/unit.service";
 import {
   deleteModuleRow,
   findModuleById,
@@ -72,6 +73,15 @@ export async function updateModule(
   try {
     const updated = await updateModuleRow(id, columns);
     if (!updated) throw notFound("Module");
+    // The SKU, name and prefix decide which serials count as generated ones.
+    if (
+      patch.sku !== undefined ||
+      patch.name !== undefined ||
+      patch.serialPrefix !== undefined
+    ) {
+      await syncNextSeq(id);
+      return (await findModuleById(id))!;
+    }
     return updated;
   } catch (err) {
     if (isUnique(err)) throw conflict(`SKU "${patch.sku}" is already in use`);

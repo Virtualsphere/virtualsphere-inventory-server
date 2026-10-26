@@ -1,15 +1,16 @@
-import { withTransaction } from "../../db/pool";
+import { pool, type Queryable, withTransaction } from "../../db/pool";
 import type { RowDataPacket } from "mysql2/promise";
 import {
   conflict,
   isUniqueViolation as isUnique,
   notFound,
 } from "../../lib/errors";
-import { formatSerial, productCode } from "../../lib/serial";
+import { formatSerial, productCode, serialBase } from "../../lib/serial";
 import type { Settings, Unit, UnitView } from "../../types";
 import { getSettings } from "../settings/settings.repo";
 import {
   bulkInsertUnits,
+  deleteUnitRow,
   findExistingInternalSerials,
   findUnitById,
   type InsertableUnit,
@@ -17,6 +18,8 @@ import {
   listUnitsByModule,
   listUnitsForExport,
   type ListUnitsResult,
+  maxSeq,
+  maxSerialNumber,
   updateUnitRow,
 } from "./unit.repo";
 import type {
@@ -38,7 +41,6 @@ interface LockedModuleRow extends RowDataPacket {
   product_name: string;
   warranty_months: number;
   serial_prefix: string | null;
-  next_seq: number;
 }
 
 /**
@@ -58,6 +60,55 @@ function duplicateSerialConflict(err: unknown, fallback: string) {
   return conflict(fallback, msg || undefined);
 }
 
+/** The module columns that decide what its generated serials look like. */
+interface SerialModule {
+  id: string;
+  name: string;
+  sku: string;
+  serial_prefix: string | null;
+}
+
+/** `PREFIX-CODE` of a module's generated serials. */
+function moduleSerialBase(mod: SerialModule, settings: Settings): string {
+  return serialBase(
+    mod.serial_prefix ?? settings.serialPrefix ?? "",
+    productCode(mod.sku, mod.name),
+  );
+}
+
+/** The number the module's next generated serial gets: one past its highest. */
+async function nextSerialNumber(
+  conn: Queryable,
+  mod: SerialModule,
+  settings: Settings,
+): Promise<number> {
+  return (await maxSerialNumber(conn, mod.id, moduleSerialBase(mod, settings))) + 1;
+}
+
+/**
+ * Recompute `next_seq` (the number shown as "next #" in the intake preview)
+ * from the units that exist now, for one module or all of them. Numbers freed
+ * by deleting or renaming units become available again.
+ */
+export async function syncNextSeq(
+  moduleId?: string,
+  conn: Queryable = pool,
+): Promise<void> {
+  const settings = await getSettings(conn);
+  const [mods] = await conn.query<(SerialModule & RowDataPacket)[]>(
+    `SELECT id, name, sku, serial_prefix FROM modules
+     ${moduleId ? "WHERE id = ?" : ""}`,
+    moduleId ? [moduleId] : [],
+  );
+  for (const mod of mods) {
+    const next = await nextSerialNumber(conn, mod, settings);
+    await conn.query(
+      "UPDATE modules SET next_seq = ? WHERE id = ? AND next_seq <> ?",
+      [next, mod.id, next],
+    );
+  }
+}
+
 export interface IntakeResult {
   created: number;
   units: UnitView[];
@@ -68,10 +119,14 @@ export interface IntakeResult {
  *
  * The whole operation runs in one InnoDB transaction. `SELECT ... FOR UPDATE`
  * on the module row takes an exclusive row lock, so any other intake on the SAME module
- * blocks until this transaction commits and then reads the updated `next_seq`.
+ * blocks until this transaction commits and only then reads the module's units.
  * That serializes serial allocation per module: no two units can ever be
  * assigned the same sequence number (and the UNIQUE (module_id, seq) and
  * UNIQUE (internal_serial) indexes are the belt-and-braces backstop).
+ *
+ * Generated serials continue from the module's highest existing one, not from
+ * a stored counter, so numbers freed by deleting units are reused. `seq` is
+ * just the per-module insertion order and no longer matches the serial.
  */
 export async function intake(input: IntakeInput): Promise<IntakeResult> {
   const serials = input.manufacturerSerials ?? [];
@@ -80,7 +135,7 @@ export async function intake(input: IntakeInput): Promise<IntakeResult> {
 
   return withTransaction(async (conn) => {
     const [locked] = await conn.query<LockedModuleRow[]>(
-      `SELECT m.id, m.name, m.sku, m.warranty_months, m.serial_prefix, m.next_seq,
+      `SELECT m.id, m.name, m.sku, m.warranty_months, m.serial_prefix,
               p.id AS product_id, p.name AS product_name
        FROM modules m
        JOIN products p ON p.id = m.product_id
@@ -105,12 +160,13 @@ export async function intake(input: IntakeInput): Promise<IntakeResult> {
     );
     const existing = new Set<string>();
     const window = count + 16;
-    let fetchedUpTo = mod.next_seq;
-    let seq = mod.next_seq;
+    let num = await nextSerialNumber(conn, mod, settings);
+    let fetchedUpTo = num;
+    let seq = (await maxSeq(conn, mod.id)) + 1;
 
     const nextGenerated = async (): Promise<string> => {
       for (;;) {
-        if (seq >= fetchedUpTo) {
+        if (num >= fetchedUpTo) {
           const candidates = Array.from({ length: window }, (_, k) =>
             formatSerial(prefix, code, fetchedUpTo + k),
           );
@@ -118,16 +174,17 @@ export async function intake(input: IntakeInput): Promise<IntakeResult> {
             existing.add(s.toLowerCase());
           fetchedUpTo += window;
         }
-        const candidate = formatSerial(prefix, code, seq);
+        const candidate = formatSerial(prefix, code, num);
         const key = candidate.toLowerCase();
         if (!existing.has(key) && !reserved.has(key)) return candidate;
-        seq++;
+        num++;
       }
     };
 
     const toInsert: InsertableUnit[] = [];
     for (let i = 0; i < count; i++) {
       const internalSerial = overrides[i] ?? (await nextGenerated());
+      num++;
       toInsert.push({
         moduleId: mod.id,
         seq: seq++,
@@ -153,10 +210,9 @@ export async function intake(input: IntakeInput): Promise<IntakeResult> {
       throw err;
     }
 
-    await conn.query(
-      "UPDATE modules SET next_seq = ?, updated_at = NOW(3) WHERE id = ?",
-      [seq, mod.id],
-    );
+    // An override may itself look generated (e.g. a higher number), so
+    // recompute from the rows rather than trusting `num`.
+    await syncNextSeq(mod.id, conn);
 
     const units: UnitView[] = inserted.map((u) => ({
       ...u,
@@ -234,7 +290,34 @@ export async function updateUnit(
     throw err;
   }
 
+  if (patch.internalSerial !== undefined) await syncNextSeq(existing.moduleId);
+
   return (await findUnitById(id))!;
+}
+
+/**
+ * Delete a unit (e.g. one added by mistake). Units on a stock-given record
+ * can't be deleted; undo that record first. Its serial number becomes free
+ * for the next intake if it was the module's highest.
+ */
+export async function deleteUnit(id: string): Promise<void> {
+  const unit = await findUnitById(id);
+  if (!unit) throw notFound("Unit");
+  if (unit.dispatchId) {
+    throw conflict(
+      "This unit was given out. Undo its stock-given record first, then delete it.",
+    );
+  }
+  await withTransaction(async (conn) => {
+    // Same lock as intake, so the counter can't move under a running intake.
+    await conn.query("SELECT id FROM modules WHERE id = ? FOR UPDATE", [
+      unit.moduleId,
+    ]);
+    if (!(await deleteUnitRow(conn, id))) {
+      throw conflict("This unit was just given out or deleted; reload and try again.");
+    }
+    await syncNextSeq(unit.moduleId, conn);
+  });
 }
 
 // --- CSV export -----------------------------------------------------------

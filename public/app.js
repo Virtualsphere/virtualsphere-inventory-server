@@ -1636,10 +1636,25 @@ function unitModal(u, onSaved) {
       <label class="field" style="margin-top:14px"><span class="lab">Notes</span>
         <input id="u-notes" maxlength="2000" value="${esc(u.notes)}"></label>
       <div class="hint" id="u-err" style="color:var(--err-ink)"></div>`,
-    footer: `<button class="btn" data-cancel>Close</button>
+    footer: `${isAdmin() && !u.dispatchId ? `<button class="btn danger" data-del style="margin-right:auto">Delete</button>` : ""}
+             <button class="btn" data-cancel>Close</button>
              <button class="btn primary" data-save>Save</button>`,
     onMount: (root, close) => {
       $("[data-cancel]", root).addEventListener("click", close);
+      const del = $("[data-del]", root);
+      if (del)
+        del.addEventListener("click", async () => {
+          if (!confirm(`Delete unit "${u.internalSerial}"? This cannot be undone.`)) return;
+          try {
+            await api("/units/" + u.id, { method: "DELETE" });
+            toast("Unit deleted", "ok");
+            close();
+            stockChanged();
+            if (onSaved) onSaved();
+          } catch (ex) {
+            $("#u-err", root).textContent = ex.message;
+          }
+        });
       $("[data-save]", root).addEventListener("click", async (e) => {
         const errEl = $("#u-err", root);
         errEl.textContent = "";

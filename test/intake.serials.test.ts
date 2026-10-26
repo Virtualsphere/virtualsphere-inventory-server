@@ -7,7 +7,7 @@
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
 import { beforeAll, afterAll, describe, expect, it } from "vitest";
-import type { Pool } from "mysql2/promise";
+import type { Pool, RowDataPacket } from "mysql2/promise";
 
 const TEST_DB = process.env.TEST_DB_NAME;
 
@@ -104,5 +104,32 @@ describe.skipIf(!TEST_DB)("editable serials", () => {
         internalSerials: ["X-1", "x-1"],
       }),
     ).toThrow(/Duplicate internal serial/);
+  });
+
+  it("continues after the highest serial once units are deleted", async () => {
+    await pool.query("DELETE FROM units WHERE module_id = ?", [moduleId]);
+    const nextSeq = async () => {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        "SELECT next_seq FROM modules WHERE id = ?",
+        [moduleId],
+      );
+      return rows[0]!["next_seq"];
+    };
+
+    // 00001–00005, then delete 00004 and 00005.
+    const made = (await intake({ quantity: 5 })).units;
+    await svc.deleteUnit(made[3]!.id);
+    await svc.deleteUnit(made[4]!.id);
+    expect(await nextSeq()).toBe(4);
+
+    // Their numbers are reused even though seq 4 and 5 were taken before.
+    let r = await intake({ quantity: 2 });
+    expect(r.units.map((u) => u.internalSerial)).toEqual(["SW1-00004", "SW1-00005"]);
+
+    // A unit renamed to a lower number frees its old one too.
+    await svc.updateUnit(r.units[1]!.id, { internalSerial: "OLD-5" });
+    expect(await nextSeq()).toBe(5);
+    r = await intake({ quantity: 1 });
+    expect(r.units[0]!.internalSerial).toBe("SW1-00005");
   });
 });

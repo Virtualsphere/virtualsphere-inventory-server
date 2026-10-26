@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { asyncHandler } from "../../lib/asyncHandler";
+import { requireAdmin } from "../../middleware/auth";
 import { parse } from "../../lib/validate";
 import {
   intakeSchema,
@@ -9,6 +10,7 @@ import {
   updateUnitSchema,
 } from "./unit.schema";
 import {
+  deleteUnit,
   exportUnitsCsv,
   getUnit,
   intake,
@@ -77,5 +79,16 @@ unitRoutes.patch(
     const { id } = parse(idParam, req.params);
     const patch = parse(updateUnitSchema, req.body);
     res.json(await updateUnit(id, patch));
+  }),
+);
+
+// DELETE /api/units/:id   (admin only; not for units on a stock-given record)
+unitRoutes.delete(
+  "/:id",
+  requireAdmin,
+  asyncHandler(async (req, res) => {
+    const { id } = parse(idParam, req.params);
+    await deleteUnit(id);
+    res.status(204).end();
   }),
 );

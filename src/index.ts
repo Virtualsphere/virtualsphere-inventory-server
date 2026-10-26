@@ -3,12 +3,15 @@ import { createApp } from "./app";
 import { assertAuthConfig, config } from "./config";
 import { pool } from "./db/pool";
 import { ensureAdmin } from "./modules/auth/bootstrapAdmin";
+import { syncNextSeq } from "./modules/units/unit.service";
 
 let server: Server | undefined;
 
 async function start(): Promise<void> {
   assertAuthConfig();
   await ensureAdmin();
+  // Bring every module's "next serial" in line with the units that exist.
+  await syncNextSeq();
 
   const app = createApp();
   server = app.listen(config.port, () => {

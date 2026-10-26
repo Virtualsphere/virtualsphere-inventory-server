@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
-import { pool, type PoolConnection } from "../../db/pool";
+import { pool, type PoolConnection, type Queryable } from "../../db/pool";
 import type { Unit, UnitStatus, UnitView } from "../../types";
 
 interface UnitRow extends RowDataPacket {
@@ -143,6 +143,52 @@ export async function findExistingInternalSerials(
     [serials],
   );
   return rows.map((r) => String(r["internal_serial"]));
+}
+
+/** Highest `seq` used in a module (0 when it has no units). */
+export async function maxSeq(
+  conn: Queryable,
+  moduleId: string,
+): Promise<number> {
+  const [rows] = await conn.query<RowDataPacket[]>(
+    "SELECT COALESCE(MAX(seq), 0) AS n FROM units WHERE module_id = ?",
+    [moduleId],
+  );
+  return Number(rows[0]?.["n"] ?? 0);
+}
+
+/**
+ * Highest NNNNN among a module's units whose internal serial has the
+ * generated shape `${base}-NNNNN` (0 when there are none). Hand-typed serials
+ * of another shape don't count.
+ */
+export async function maxSerialNumber(
+  conn: Queryable,
+  moduleId: string,
+  base: string,
+): Promise<number> {
+  const pattern = base.replace(/[\\%_]/g, "\\$&") + "-%";
+  const from = base.length + 2; // 1-based position just past `${base}-`
+  const [rows] = await conn.query<RowDataPacket[]>(
+    `SELECT MAX(CAST(SUBSTRING(internal_serial, ?) AS UNSIGNED)) AS n
+     FROM units
+     WHERE module_id = ? AND internal_serial LIKE ?
+       AND SUBSTRING(internal_serial, ?) REGEXP '^[0-9]+$'`,
+    [from, moduleId, pattern, from],
+  );
+  return Number(rows[0]?.["n"] ?? 0);
+}
+
+/** Delete a unit that isn't part of a stock-given record. */
+export async function deleteUnitRow(
+  conn: Queryable,
+  id: string,
+): Promise<boolean> {
+  const [res] = await conn.query<ResultSetHeader>(
+    "DELETE FROM units WHERE id = ? AND dispatch_id IS NULL",
+    [id],
+  );
+  return res.affectedRows > 0;
 }
 
 interface UnitFilters {

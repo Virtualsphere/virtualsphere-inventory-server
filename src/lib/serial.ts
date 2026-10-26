@@ -11,6 +11,11 @@ export function productCode(sku: string, name: string): string {
   return base || "ITEM";
 }
 
+/** `PREFIX-PRODUCTCODE` — every generated serial is this plus `-NNNNN`. */
+export function serialBase(prefix: string, code: string): string {
+  return [prefix.trim(), code].filter((s) => s.length > 0).join("-");
+}
+
 /** Build one internal serial. `seq` is zero-padded to 5 digits. */
 export function formatSerial(
   prefix: string,
@@ -18,5 +23,5 @@ export function formatSerial(
   seq: number,
 ): string {
   const n = String(seq).padStart(5, "0");
-  return [prefix.trim(), code, n].filter((s) => s.length > 0).join("-");
+  return [serialBase(prefix, code), n].filter((s) => s.length > 0).join("-");
 }
