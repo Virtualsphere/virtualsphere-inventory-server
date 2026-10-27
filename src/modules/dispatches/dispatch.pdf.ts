@@ -33,7 +33,7 @@ export function buildDispatchPdf(
     margin: MARGIN,
     bufferPages: true, // footers ("Page x of y") are stamped once all pages exist
     info: {
-      Title: `Warranty card ${d.invoiceNo}`,
+      Title: `${d.items.length ? "Warranty card" : "Delivery note"} ${d.invoiceNo}`,
       Author: settings.companyName,
       Subject: `Stock given to ${d.customerName}`,
     },
@@ -50,8 +50,9 @@ export function buildDispatchPdf(
 
   header(doc, d, left, width);
   parties(doc, d, left, width);
-  itemsTable(doc, d, left, width);
-  serials(doc, d, left, width);
+  if (d.items.length) itemsTable(doc, d, left, width);
+  if (d.tags.length) tagsTable(doc, d, left, width);
+  if (d.items.length) serials(doc, d, left, width);
   notesAndSignatures(doc, d, settings, left, width);
   footers(doc, d, settings);
 
@@ -73,8 +74,9 @@ function header(doc: Doc, d: DispatchDetail, left: number, width: number): void 
   if (existsSync(LOGO_PATH)) doc.image(LOGO_PATH, left, top, { width: 190 });
 
   const right = left + width;
+  // Tags carry no warranty, so a tags-only hand-over is a delivery note.
   doc.font("Helvetica-Bold").fontSize(18).fillColor(INK)
-    .text("WARRANTY CARD", left, top, { width, align: "right" });
+    .text(d.items.length ? "WARRANTY CARD" : "DELIVERY NOTE", left, top, { width, align: "right" });
   // Label column, then the value right-aligned to the page edge.
   const meta = (label: string, value: string, y: number) => {
     doc.font("Helvetica").fontSize(9.5).fillColor(SOFT).text(label, right - 230, y, { width: 70 });
@@ -107,11 +109,12 @@ function parties(doc: Doc, d: DispatchDetail, left: number, width: number): void
     ["Phone", d.customerPhone],
     ["GSTIN", d.gstNo ?? "—"],
   ]);
-  const yRight = block(left + colW + 20, "Details", [
-    ["Given date", d.givenDate],
-    ["Warranty till", d.validUntil ?? "—"],
-    ["Total units", String(d.quantity)],
-  ]);
+  const details: Array<[string, string]> = [["Given date", d.givenDate]];
+  if (d.items.length) {
+    details.push(["Warranty till", d.validUntil ?? "—"], ["Total units", String(d.quantity)]);
+  }
+  if (d.tags.length) details.push(["Total tags", String(d.tagQuantity)]);
+  const yRight = block(left + colW + 20, "Details", details);
   doc.y = Math.max(yLeft, yRight) + 10;
 }
 
@@ -175,6 +178,26 @@ function itemsTable(doc: Doc, d: DispatchDetail, left: number, width: number): v
     row(doc, cols, [String(i + 1), it.productName, it.moduleName, it.sku, String(it.quantity)], left);
   });
   row(doc, cols, ["", "", "", "Total", String(d.quantity)], left, { bold: true });
+  doc.y += 14;
+}
+
+function tagsTable(doc: Doc, d: DispatchDetail, left: number, width: number): void {
+  sectionTitle(doc, "Tags", left);
+  const cols: Col[] = [
+    { title: "#", w: 26 },
+    { title: "Tag", w: width - 26 - 60 },
+    { title: "Qty", w: 60, align: "right" },
+  ];
+  const head = () => row(doc, cols, cols.map((c) => c.title.toUpperCase()), left, { bold: true, fill: FILL, size: 8 });
+  head();
+  d.tags.forEach((t, i) => {
+    if (doc.y + 30 > doc.page.height - MARGIN - FOOTER_H) {
+      doc.addPage();
+      head();
+    }
+    row(doc, cols, [String(i + 1), t.tagName, String(t.quantity)], left);
+  });
+  row(doc, cols, ["", "Total", String(d.tagQuantity)], left, { bold: true });
   doc.y += 14;
 }
 

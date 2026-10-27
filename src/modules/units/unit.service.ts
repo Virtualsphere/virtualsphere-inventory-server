@@ -7,6 +7,8 @@ import {
 } from "../../lib/errors";
 import { formatSerial, productCode, serialBase } from "../../lib/serial";
 import type { Settings, Unit, UnitView } from "../../types";
+import { insertUnitResources, listUnitResources } from "../resources/resource.repo";
+import { consumeForUnits, moveResources } from "../resources/resource.service";
 import { getSettings } from "../settings/settings.repo";
 import {
   bulkInsertUnits,
@@ -210,6 +212,13 @@ export async function intake(input: IntakeInput): Promise<IntakeResult> {
       throw err;
     }
 
+    // Every new unit is built with the same per-unit resources.
+    const resources = input.resources ?? [];
+    if (resources.length) {
+      await consumeForUnits(conn, resources, inserted.length);
+      await insertUnitResources(conn, inserted.map((u) => u.id), resources);
+    }
+
     // An override may itself look generated (e.g. a higher number), so
     // recompute from the rows rather than trusting `num`.
     await syncNextSeq(mod.id, conn);
@@ -298,7 +307,8 @@ export async function updateUnit(
 /**
  * Delete a unit (e.g. one added by mistake). Units on a stock-given record
  * can't be deleted; undo that record first. Its serial number becomes free
- * for the next intake if it was the module's highest.
+ * for the next intake if it was the module's highest, and the resources it
+ * was built with go back in stock.
  */
 export async function deleteUnit(id: string): Promise<void> {
   const unit = await findUnitById(id);
@@ -313,6 +323,8 @@ export async function deleteUnit(id: string): Promise<void> {
     await conn.query("SELECT id FROM modules WHERE id = ? FOR UPDATE", [
       unit.moduleId,
     ]);
+    const used = await listUnitResources(conn, id);
+    await moveResources(conn, new Map(used.map((r) => [r.resourceId, r.quantity])));
     if (!(await deleteUnitRow(conn, id))) {
       throw conflict("This unit was just given out or deleted; reload and try again.");
     }

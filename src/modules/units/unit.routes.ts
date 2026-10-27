@@ -3,6 +3,8 @@ import { z } from "zod";
 import { asyncHandler } from "../../lib/asyncHandler";
 import { requireAdmin } from "../../middleware/auth";
 import { parse } from "../../lib/validate";
+import { setUnitResourcesSchema } from "../resources/resource.schema";
+import { getUnitResources, setUnitResources } from "../resources/resource.service";
 import {
   intakeSchema,
   listUnitsSchema,
@@ -79,6 +81,25 @@ unitRoutes.patch(
     const { id } = parse(idParam, req.params);
     const patch = parse(updateUnitSchema, req.body);
     res.json(await updateUnit(id, patch));
+  }),
+);
+
+// GET /api/units/:id/resources   (what the unit was built with)
+unitRoutes.get(
+  "/:id/resources",
+  asyncHandler(async (req, res) => {
+    const { id } = parse(idParam, req.params);
+    res.json(await getUnitResources(id));
+  }),
+);
+
+// PUT /api/units/:id/resources   (replace them; resource stock moves by the difference)
+unitRoutes.put(
+  "/:id/resources",
+  asyncHandler(async (req, res) => {
+    const { id } = parse(idParam, req.params);
+    const { resources } = parse(setUnitResourcesSchema, req.body);
+    res.json(await setUnitResources(id, resources));
   }),
 );
 

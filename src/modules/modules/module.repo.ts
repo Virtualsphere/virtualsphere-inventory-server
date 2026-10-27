@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
-import { pool } from "../../db/pool";
+import { pool, type Queryable } from "../../db/pool";
 import type { Module, ModuleWithCounts } from "../../types";
 
 interface ModuleRow extends RowDataPacket {
@@ -137,8 +137,11 @@ export async function updateModuleRow(
   return findModuleById(id);
 }
 
-export async function deleteModuleRow(id: string): Promise<boolean> {
-  const [res] = await pool.query<ResultSetHeader>(
+export async function deleteModuleRow(
+  id: string,
+  conn: Queryable = pool,
+): Promise<boolean> {
+  const [res] = await conn.query<ResultSetHeader>(
     "DELETE FROM modules WHERE id = ?",
     [id],
   );

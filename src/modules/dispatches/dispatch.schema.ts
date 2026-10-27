@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { config } from "../../config";
+import { MAX_TAG_QUANTITY } from "../tags/tag.schema";
 
 const isoDate = z
   .string()
@@ -8,7 +9,7 @@ const isoDate = z
 /** Indian GSTIN: 2-digit state code, PAN, entity number, 'Z', checksum. */
 const GSTIN = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
 
-/** Most lines one hand-over may have (each line is one module). */
+/** Most lines of each kind one hand-over may have (a module or a tag each). */
 const MAX_ITEMS = 100;
 
 /**
@@ -37,6 +38,12 @@ const dispatchItemSchema = z
     }
   });
 
+/** One tag line of a hand-over: tags have no serials, just a quantity. */
+const dispatchTagSchema = z.object({
+  tagId: z.string().uuid(),
+  quantity: z.number().int().min(1).max(MAX_TAG_QUANTITY),
+});
+
 /** The hand-over's own fields, shared by create and edit. */
 const headerFields = {
   invoiceNo: z.string().trim().min(1, "Invoice number is required").max(64),
@@ -60,18 +67,33 @@ const headerFields = {
 
 /**
  * Give stock to a customer: one invoice, customer, given date and validity,
- * and one or more modules (`items`). Saved as one record with a line per item.
+ * and modules (`items`) and/or tags (`tags`) — at least one of either. Saved
+ * as one record with a line per module and per tag. The validity is for the
+ * modules' warranty; tags have none, so a tags-only hand-over leaves it null.
  */
 export const createDispatchSchema = z
   .object({
     ...headerFields,
     notes: headerFields.notes.optional().default(""),
-    items: z
-      .array(dispatchItemSchema)
-      .min(1, "Add at least one product to give")
-      .max(MAX_ITEMS),
+    items: z.array(dispatchItemSchema).max(MAX_ITEMS).optional().default([]),
+    tags: z.array(dispatchTagSchema).max(MAX_ITEMS).optional().default([]),
   })
   .superRefine((val, ctx) => {
+    if (val.items.length === 0 && val.tags.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["items"],
+        message: "Add at least one product or tag to give",
+      });
+    }
+    const tagIds = val.tags.map((t) => t.tagId);
+    if (new Set(tagIds).size !== tagIds.length) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["tags"],
+        message: "The same tag is added twice — combine those lines",
+      });
+    }
     if (val.validUntil && val.validUntil < val.givenDate) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -121,4 +143,5 @@ export const listDispatchesSchema = z.object({
 export type CreateDispatchInput = z.infer<typeof createDispatchSchema>;
 export type UpdateDispatchInput = z.infer<typeof updateDispatchSchema>;
 export type DispatchItemInput = CreateDispatchInput["items"][number];
+export type DispatchTagInput = CreateDispatchInput["tags"][number];
 export type ListDispatchesInput = z.infer<typeof listDispatchesSchema>;

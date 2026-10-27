@@ -4,12 +4,14 @@ import { type PoolConnection, withTransaction } from "../../db/pool";
 import { badRequest, conflict, notFound } from "../../lib/errors";
 import type { DispatchDetail } from "../../types";
 import { getSettings } from "../settings/settings.repo";
+import { changeTagStock } from "../tags/tag.repo";
 import { listUnitsByDispatch } from "../units/unit.repo";
 import { buildDispatchPdf } from "./dispatch.pdf";
 import {
   findDispatchById,
   insertDispatch,
   insertDispatchItem,
+  insertDispatchTag,
   listDispatches,
   type ListDispatchesResult,
   updateDispatchRow,
@@ -17,6 +19,7 @@ import {
 import type {
   CreateDispatchInput,
   DispatchItemInput,
+  DispatchTagInput,
   ListDispatchesInput,
   UpdateDispatchInput,
 } from "./dispatch.schema";
@@ -33,15 +36,22 @@ interface LockedModuleRow extends RowDataPacket {
   name: string;
 }
 
+interface LockedTagRow extends RowDataPacket {
+  id: string;
+  name: string;
+  in_stock: number;
+}
+
 /**
  * GIVE STOCK — one hand-over record (invoice, customer, dates) with a line per
- * module, all written in one transaction, so either all of it goes out or
- * none does. All the modules involved are
+ * module and per tag, all written in one transaction, so either all of it
+ * goes out or none does. All the modules involved are
  * locked first (FOR UPDATE, in id order so two hand-overs sharing modules
  * can't deadlock), which serializes dispatches of the same module; then each
  * line's units are locked and checked to be in stock. The final UPDATE per
  * line still re-checks `status = 'in_stock'` and the row count, so a unit can
- * never be given out twice.
+ * never be given out twice. Tags are locked after the modules (also in id
+ * order) and their stock is taken with a guarded UPDATE that can't go below 0.
  */
 export async function createDispatch(
   input: CreateDispatchInput,
@@ -49,12 +59,26 @@ export async function createDispatch(
 ): Promise<DispatchDetail> {
   const id = await withTransaction(async (conn) => {
     const moduleIds = [...new Set(input.items.map((i) => i.moduleId))].sort();
-    const [locked] = await conn.query<LockedModuleRow[]>(
-      "SELECT id, name FROM modules WHERE id IN (?) ORDER BY id FOR UPDATE",
-      [moduleIds],
-    );
-    if (locked.length !== moduleIds.length) throw notFound("Module");
-    const moduleName = new Map(locked.map((m) => [m.id, m.name]));
+    const moduleName = new Map<string, string>();
+    if (moduleIds.length) {
+      const [locked] = await conn.query<LockedModuleRow[]>(
+        "SELECT id, name FROM modules WHERE id IN (?) ORDER BY id FOR UPDATE",
+        [moduleIds],
+      );
+      if (locked.length !== moduleIds.length) throw notFound("Module");
+      for (const m of locked) moduleName.set(m.id, m.name);
+    }
+
+    const tagLines = [...input.tags].sort((a, b) => a.tagId.localeCompare(b.tagId));
+    const tags = new Map<string, LockedTagRow>();
+    if (tagLines.length) {
+      const [locked] = await conn.query<LockedTagRow[]>(
+        "SELECT id, name, in_stock FROM tags WHERE id IN (?) ORDER BY id FOR UPDATE",
+        [tagLines.map((t) => t.tagId)],
+      );
+      if (locked.length !== tagLines.length) throw notFound("Tag");
+      for (const t of locked) tags.set(t.id, t);
+    }
 
     const dispatchId = randomUUID();
     await insertDispatch(conn, {
@@ -70,6 +94,9 @@ export async function createDispatch(
     });
     for (const item of input.items) {
       await giveItem(conn, dispatchId, input, item, moduleName.get(item.moduleId)!);
+    }
+    for (const line of tagLines) {
+      await giveTag(conn, dispatchId, line, tags.get(line.tagId)!);
     }
     return dispatchId;
   });
@@ -133,6 +160,19 @@ async function giveItem(
   }
 }
 
+/** One tag line of a hand-over, inside createDispatch's transaction. */
+async function giveTag(
+  conn: PoolConnection,
+  dispatchId: string,
+  line: DispatchTagInput,
+  tag: LockedTagRow,
+): Promise<void> {
+  if (!(await changeTagStock(conn, line.tagId, -line.quantity))) {
+    throw conflict(`Only ${tag.in_stock} of tag ${tag.name} in stock`);
+  }
+  await insertDispatchTag(conn, dispatchId, line.tagId, line.quantity);
+}
+
 export function listDispatchesPaged(
   input: ListDispatchesInput,
 ): Promise<ListDispatchesResult> {
@@ -183,27 +223,40 @@ export async function updateDispatch(
   return getDispatch(id);
 }
 
-/** The warranty card PDF for one hand-over, with a filename safe for a header. */
+/**
+ * The warranty card PDF for one hand-over (a delivery note when it has only
+ * tags), with a filename safe for a header.
+ */
 export async function getDispatchPdf(
   id: string,
 ): Promise<{ filename: string; pdf: Buffer }> {
   const [dispatch, settings] = await Promise.all([getDispatch(id), getSettings()]);
   const safe = dispatch.invoiceNo.replace(/[^A-Za-z0-9._-]+/g, "_");
   return {
-    filename: `warranty-card-${safe}.pdf`,
+    filename: `${dispatch.items.length ? "warranty-card" : "delivery-note"}-${safe}.pdf`,
     pdf: await buildDispatchPdf(dispatch, settings),
   };
 }
 
 /**
  * Undo a hand-over entered by mistake: units still marked sold (from every
- * line) go back in stock, and the record and its lines are deleted. Units since marked returned/defective
+ * line) and its tags go back in stock, and the record and its lines are deleted. Units since marked returned/defective
  * keep their status (their link to the record is cleared by the FK).
  */
 export async function deleteDispatch(id: string): Promise<void> {
   await withTransaction(async (conn) => {
-    const existing = await findDispatchById(id, conn);
-    if (!existing) throw notFound("Dispatch");
+    // Lock the record first, so two undos of it can't both return its tags.
+    const [locked] = await conn.query<RowDataPacket[]>(
+      "SELECT id FROM dispatches WHERE id = ? FOR UPDATE",
+      [id],
+    );
+    if (!locked[0]) throw notFound("Dispatch");
+    const existing = (await findDispatchById(id, conn))!;
+    // Tags before units, and tags by id — the order createDispatch locks in.
+    const tagLines = [...existing.tags].sort((a, b) => a.tagId.localeCompare(b.tagId));
+    for (const line of tagLines) {
+      await changeTagStock(conn, line.tagId, line.quantity);
+    }
     await conn.query(
       `UPDATE units
        SET status = 'in_stock', sold_to = NULL, sold_date = NULL,

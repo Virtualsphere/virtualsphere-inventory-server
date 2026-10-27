@@ -107,6 +107,7 @@
   .chip.sold{background:var(--sold-bg);color:var(--sold-ink)}
   .chip.returned{background:var(--warn-bg);color:var(--warn-ink)}
   .chip.defective{background:var(--err-bg);color:var(--err-ink)}
+  .chip.tag{background:var(--panel-2);color:var(--ink-soft);border-color:var(--line)}
 
   /* Forms */
   label.field{display:block;margin-bottom:14px}
@@ -188,6 +189,9 @@
   /* Stock given: the product lines of one hand-over */
   .item-line{display:flex;align-items:baseline;gap:10px}
   .item-line + .item-line{margin-top:8px}
+  .res-line{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+  .res-line select{flex:1 1 200px;width:auto}
+  .res-line input{width:100px}
   .item-h{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:6px}
   .banner{display:flex;gap:10px;align-items:center;padding:10px 14px;border-radius:var(--r-sm);font-size:13px;margin-bottom:16px}
   .banner.err{background:var(--err-bg);color:var(--err-ink)}
@@ -257,6 +261,8 @@
       <nav class="nav" id="nav">
         <a data-route="dashboard"><span class="i">◧</span> Dashboard</a>
         <a data-route="products"><span class="i">▤</span> Products</a>
+        <a data-route="tags"><span class="i">◈</span> Tags</a>
+        <a data-route="resources"><span class="i">▣</span> Resources</a>
         <a data-route="intake"><span class="i">＋</span> Add stock</a>
         <a data-route="give"><span class="i">－</span> Give stock</a>
         <a data-route="dispatches"><span class="i">⇥</span> Stock given</a>

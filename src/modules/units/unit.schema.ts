@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { config } from "../../config";
+import { unitResourcesSchema } from "../resources/resource.schema";
 
 const isoDate = z
   .string()
@@ -32,6 +33,8 @@ const optionalSerial = z
  *    past the end of the array) get no supplier serial
  * Optional `internalSerials` overrides the generated internal serial per unit
  * (same order as the units; null or "" keeps the generated one).
+ * Optional `resources` are what EACH unit is built with; stock goes down by
+ * that times the number of units.
  */
 export const intakeSchema = z
   .object({
@@ -41,6 +44,7 @@ export const intakeSchema = z
     internalSerials: z.array(optionalSerial).optional(),
     intakeDate: isoDate.optional(),
     notes: z.string().trim().max(2000).optional().default(""),
+    resources: unitResourcesSchema.optional().default([]),
   })
   .superRefine((val, ctx) => {
     const hasSerials =

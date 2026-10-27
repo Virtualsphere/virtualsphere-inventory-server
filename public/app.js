@@ -197,7 +197,7 @@ function emptyState(icon, text, actionHtml) {
 
 // --------------------------------------------------------------- shared state
 // products: the top-level groups; modules: the stocked items, each in a product.
-const state = { settings: null, products: null, modules: null, user: null };
+const state = { settings: null, products: null, modules: null, tags: null, resources: null, user: null };
 
 async function loadSettings(force) {
   if (!state.settings || force) state.settings = await api("/settings");
@@ -213,10 +213,22 @@ async function loadModules(force) {
   if (!state.modules || force) state.modules = await api("/modules");
   return state.modules;
 }
+/** All tags, by name. Tags are stocked by quantity only. */
+async function loadTags(force) {
+  if (!state.tags || force) state.tags = await api("/tags");
+  return state.tags;
+}
+/** All resources (parts units are built from), by name. */
+async function loadResources(force) {
+  if (!state.resources || force) state.resources = await api("/resources");
+  return state.resources;
+}
 /** Stock counts changed: drop the cached lists so they're refetched. */
 function stockChanged() {
   state.products = null;
   state.modules = null;
+  state.tags = null;
+  state.resources = null;
 }
 
 /** A Product + Module select pair (ids `${prefix}-product` / `${prefix}-module`). */
@@ -641,7 +653,11 @@ function moduleModal(mod, productId) {
 
 // --------------------------------------------------------------------- intake
 routes.intake = async (view, params) => {
-  const [modules] = await Promise.all([loadModules(true), loadSettings()]);
+  const [modules, , resources] = await Promise.all([
+    loadModules(true),
+    loadSettings(),
+    loadResources(true),
+  ]);
   setHeader("Add stock", "Create units and map serials", "");
 
   if (!modules.length) {
@@ -685,6 +701,11 @@ routes.intake = async (view, params) => {
       <label class="field"><span class="lab">Notes <span class="muted">(optional, applied to all)</span></span>
         <input id="i-notes" placeholder="e.g. PO-2291, received from Acme"></label>
 
+      <div class="field"><span class="lab">Resources used per unit <span class="muted">(optional)</span></span>
+        <div id="i-res"></div>
+        <div class="hint">Taken out of resource stock for every unit added. Forgot one? Add it later from Inventory → Details.</div>
+      </div>
+
       <div class="panel" style="margin-top:4px"><div class="panel-h"><h2>Preview</h2>
         <span class="muted" id="i-count" style="font-size:12px"></span></div>
         <div class="panel-b" id="i-preview"></div></div>
@@ -694,6 +715,8 @@ routes.intake = async (view, params) => {
     </div></div>`;
 
   let mode = "serials";
+  let unitCount = 0;
+  const resEditor = resourceEditor($("#i-res", view), resources, [], () => unitCount);
   const serialsWrap = $("#i-serials-wrap", view);
   const qtyWrap = $("#i-qty-wrap", view);
   const prev = $("#i-preview", view);
@@ -730,6 +753,8 @@ routes.intake = async (view, params) => {
         internal: formatSerial(prefix, code, p.nextSeq + i),
       }));
     }
+    unitCount = items.length;
+    resEditor.refresh();
     countEl.textContent = items.length
       ? `${items.length} unit${items.length === 1 ? "" : "s"} · next #${String(p.nextSeq).padStart(5, "0")}`
       : "";
@@ -831,6 +856,12 @@ routes.intake = async (view, params) => {
         );
       }
     }
+    const used = resEditor.value();
+    if (typeof used === "string") {
+      errEl.textContent = used;
+      return;
+    }
+    if (used.length) body.resources = used;
     const count = body.quantity ?? body.manufacturerSerials.length;
     const edited = Object.keys(overrides).map(Number).filter((i) => i < count);
     if (edited.length) {
@@ -857,6 +888,502 @@ routes.intake = async (view, params) => {
   });
 };
 
+// ----------------------------------------------------------------------- tags
+// Tags are stocked by quantity only: no serials, no warranty.
+routes.tags = async (view) => {
+  const tags = await loadTags(true);
+  const inStock = tags.reduce((n, t) => n + t.inStock, 0);
+  setHeader(
+    "Tags",
+    `${tags.length} tag${tags.length === 1 ? "" : "s"} · ${inStock} in stock`,
+    `<button class="btn primary" data-new>＋ New tag</button>`,
+    (a) => a.querySelector("[data-new]").addEventListener("click", () => qtyItemModal(TAG_KIND)),
+  );
+
+  if (!tags.length) {
+    view.innerHTML = emptyState(
+      "◈",
+      "No tags yet. Create a tag, then add its stock by quantity.",
+      `<button class="btn primary" id="nt">＋ New tag</button>`,
+    );
+    $("#nt", view).addEventListener("click", () => qtyItemModal(TAG_KIND));
+    return;
+  }
+
+  view.innerHTML = `
+    <div class="toolbar">
+      <div class="grow search"><span class="ic">⌕</span>
+        <input id="t-q" placeholder="Search tags…"></div>
+    </div>
+    <div class="panel"><div class="panel-b flush"><table>
+      <thead><tr><th>Tag</th><th>In stock</th><th>Added</th><th>Given</th><th></th></tr></thead>
+      <tbody id="t-rows"></tbody>
+    </table></div></div>`;
+
+  const rows = $("#t-rows", view);
+  const renderRows = () => {
+    const needle = $("#t-q", view).value.trim().toLowerCase();
+    const shown = tags.filter(
+      (t) =>
+        !needle ||
+        t.name.toLowerCase().includes(needle) ||
+        t.description.toLowerCase().includes(needle),
+    );
+    rows.innerHTML = shown.length
+      ? shown
+          .map(
+            (t) => `
+        <tr>
+          <td><b>${esc(t.name)}</b>${t.description ? `<div class="muted" style="font-size:12px">${esc(t.description)}</div>` : ""}</td>
+          <td><b>${t.inStock}</b></td>
+          <td class="muted">${t.totalAdded}</td>
+          <td class="muted">${t.totalGiven}</td>
+          <td style="text-align:right;white-space:nowrap">
+            <button class="btn sm primary" data-add="${t.id}">Add stock</button>
+            ${t.inStock ? `<button class="btn sm" data-give="${t.id}">Give</button>` : ""}
+            <button class="btn sm" data-view="${t.id}">Details</button>
+            <button class="btn sm ghost" data-edit="${t.id}">Edit</button>
+          </td>
+        </tr>`,
+          )
+          .join("")
+      : `<tr><td colspan="5" class="muted">No tag matches that search.</td></tr>`;
+  };
+  renderRows();
+  $("#t-q", view).addEventListener("input", renderRows);
+  rows.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    const { add, give, view: viewId, edit } = b.dataset;
+    if (add) qtyStockModal(TAG_KIND, tags.find((t) => t.id === add));
+    else if (give) go("give?tagId=" + give);
+    else if (viewId) qtyDetailModal(TAG_KIND, viewId);
+    else if (edit) qtyItemModal(TAG_KIND, tags.find((t) => t.id === edit));
+  });
+};
+
+/**
+ * Tags and resources are both stocked by quantity only, so they share their
+ * create / add-stock / detail modals. A kind says which one and how to word it.
+ */
+const TAG_KIND = {
+  api: "/tags",
+  noun: "tag",
+  Noun: "Tag",
+  namePh: "e.g. VST-JTL03",
+  descPh: "e.g. Jewellery tag (100×14 mm)",
+  hint: "Tags are counted by quantity only — no serials or warranty.",
+  /** Where the tag went: one row per hand-over. */
+  usageHtml: (t) => `
+      <div class="item-h"><b>Given out</b><span class="muted">${t.given.length} record${t.given.length === 1 ? "" : "s"}</span></div>
+      <div class="panel" style="margin-bottom:0"><div class="panel-b flush">
+      ${
+        t.given.length
+          ? `<table><thead><tr><th>Given</th><th>Invoice</th><th>Customer</th><th>Qty</th><th></th></tr></thead><tbody>
+            ${t.given
+              .map(
+                (g) => `<tr>
+                <td class="mono" style="font-size:12.5px;white-space:nowrap">${esc(g.givenDate)}</td>
+                <td class="mono">${esc(g.invoiceNo)}</td>
+                <td><b>${esc(g.customerName)}</b></td>
+                <td><b>${g.quantity}</b></td>
+                <td style="text-align:right"><button class="btn sm ghost" data-open="${g.dispatchId}">Details</button></td>
+              </tr>`,
+              )
+              .join("")}
+            </tbody></table>`
+          : `<div class="panel-b muted">Not given out yet.</div>`
+      }
+      </div></div>`,
+  totals: (t) => [["Total given", t.totalGiven]],
+};
+
+const RESOURCE_KIND = {
+  api: "/resources",
+  noun: "resource",
+  Noun: "Resource",
+  namePh: "e.g. Antenna",
+  descPh: "e.g. 9 dBi, SMA connector",
+  hint: "Resources are counted by quantity. Choose which ones each unit uses when you add stock.",
+  /** What the resource went into: one row per module. */
+  usageHtml: (r) => `
+      <div class="item-h"><b>Used in</b><span class="muted">${r.usage.length} module${r.usage.length === 1 ? "" : "s"}</span></div>
+      <div class="panel" style="margin-bottom:0"><div class="panel-b flush">
+      ${
+        r.usage.length
+          ? `<table><thead><tr><th>Product / module</th><th>Units</th><th>Used</th><th></th></tr></thead><tbody>
+            ${r.usage
+              .map(
+                (u) => `<tr>
+                <td>${moduleCell(u)}</td>
+                <td class="muted">${u.units}</td>
+                <td><b>${u.quantity}</b></td>
+                <td style="text-align:right"><button class="btn sm ghost" data-units="${u.moduleId}">Units</button></td>
+              </tr>`,
+              )
+              .join("")}
+            </tbody></table>`
+          : `<div class="panel-b muted">No units use this resource yet.</div>`
+      }
+      </div></div>`,
+  totals: (r) => [["Total used", r.totalUsed]],
+};
+
+/** Create an item of `kind` (optionally with opening stock), or edit `item`'s name / description. */
+function qtyItemModal(kind, item) {
+  const editing = !!item;
+  openModal({
+    title: editing ? `Edit ${kind.noun}` : `New ${kind.noun}`,
+    body: `
+      <label class="field"><span class="lab">${kind.Noun} name</span>
+        <input id="t-name" maxlength="200" value="${esc(item?.name || "")}" placeholder="${esc(kind.namePh)}"></label>
+      <label class="field"><span class="lab">Description <span class="muted">(optional)</span></span>
+        <input id="t-desc" maxlength="2000" value="${esc(item?.description || "")}" placeholder="${esc(kind.descPh)}"></label>
+      ${
+        editing
+          ? ""
+          : `<label class="field"><span class="lab">Opening stock <span class="muted">(optional)</span></span>
+               <input id="t-qty" type="number" min="1" placeholder="e.g. 100"></label>
+             <div class="hint">${esc(kind.hint)}</div>`
+      }
+      <div class="hint" id="t-err" style="color:var(--err-ink)"></div>`,
+    footer: `${editing && isAdmin() ? `<button class="btn danger" data-del style="margin-right:auto">Delete</button>` : ""}
+             <button class="btn" data-cancel>Cancel</button>
+             <button class="btn primary" data-save>${editing ? "Save" : "Create"}</button>`,
+    onMount: (root, close) => {
+      const errEl = $("#t-err", root);
+      $("[data-cancel]", root).addEventListener("click", close);
+      $("[data-save]", root).addEventListener("click", async (e) => {
+        errEl.textContent = "";
+        const body = {
+          name: $("#t-name", root).value.trim(),
+          description: $("#t-desc", root).value.trim(),
+        };
+        if (!body.name) {
+          errEl.textContent = `${kind.Noun} name is required.`;
+          return;
+        }
+        if (!editing) {
+          const raw = $("#t-qty", root).value.trim();
+          if (raw) {
+            const qty = Number(raw);
+            if (!Number.isInteger(qty) || qty < 1) {
+              errEl.textContent = "Opening stock must be a whole number, at least 1.";
+              return;
+            }
+            body.quantity = qty;
+          }
+        }
+        e.target.disabled = true;
+        try {
+          if (editing) {
+            await api(`${kind.api}/${item.id}`, { method: "PATCH", body: JSON.stringify(body) });
+            toast(`${kind.Noun} updated`, "ok");
+          } else {
+            await api(kind.api, { method: "POST", body: JSON.stringify(body) });
+            toast(`${kind.Noun} created`, "ok");
+          }
+          close();
+          stockChanged();
+          render();
+        } catch (ex) {
+          errEl.textContent = validationMessage(ex);
+          e.target.disabled = false;
+        }
+      });
+      const del = $("[data-del]", root);
+      if (del)
+        del.addEventListener("click", async () => {
+          if (!confirm(`Delete ${kind.noun} "${item.name}" and its stock history?`)) return;
+          try {
+            await api(`${kind.api}/${item.id}`, { method: "DELETE" });
+            toast(`${kind.Noun} deleted`, "ok");
+            close();
+            stockChanged();
+            render();
+          } catch (ex) {
+            errEl.textContent = ex.message;
+          }
+        });
+      $("#t-name", root).focus();
+    },
+  });
+}
+
+/** Add a quantity of `item` (a `kind`) to stock. */
+function qtyStockModal(kind, item) {
+  const today = new Date().toISOString().slice(0, 10);
+  openModal({
+    title: `Add stock · ${item.name}`,
+    body: `
+      <div class="row">
+        <label class="field"><span class="lab">Quantity</span>
+          <input id="ts-qty" type="number" min="1" placeholder="e.g. 100"></label>
+        <label class="field"><span class="lab">Date</span>
+          <input id="ts-date" type="date" value="${today}"></label>
+      </div>
+      <label class="field"><span class="lab">Notes <span class="muted">(optional)</span></span>
+        <input id="ts-notes" maxlength="2000" placeholder="e.g. PO-2291, received from Acme"></label>
+      <div class="hint">${item.inStock} in stock now.</div>
+      <div class="hint" id="ts-err" style="color:var(--err-ink)"></div>`,
+    footer: `<button class="btn" data-cancel>Cancel</button>
+             <button class="btn primary" data-save>Add stock</button>`,
+    onMount: (root, close) => {
+      const errEl = $("#ts-err", root);
+      $("[data-cancel]", root).addEventListener("click", close);
+      $("[data-save]", root).addEventListener("click", async (e) => {
+        errEl.textContent = "";
+        const qty = Number($("#ts-qty", root).value);
+        if (!Number.isInteger(qty) || qty < 1) {
+          errEl.textContent = "Quantity must be a whole number, at least 1.";
+          return;
+        }
+        const body = {
+          quantity: qty,
+          intakeDate: $("#ts-date", root).value || undefined,
+          notes: $("#ts-notes", root).value.trim(),
+        };
+        e.target.disabled = true;
+        try {
+          await api(`${kind.api}/${item.id}/stock`, { method: "POST", body: JSON.stringify(body) });
+          toast(`Added ${qty} × ${item.name}`, "ok");
+          close();
+          stockChanged();
+          render();
+        } catch (ex) {
+          errEl.textContent = validationMessage(ex);
+          e.target.disabled = false;
+        }
+      });
+      $("#ts-qty", root).focus();
+    },
+  });
+}
+
+/** One item's stock: totals, every intake, and where it went (`kind.usageHtml`). */
+async function qtyDetailModal(kind, id) {
+  let t;
+  try {
+    t = await api(`${kind.api}/${id}`);
+  } catch (e) {
+    return toast(e.message, "err");
+  }
+  openModal({
+    title: `${kind.Noun} ${t.name}`,
+    wide: true,
+    body: `
+      ${t.description ? `<div class="muted" style="margin-bottom:12px">${esc(t.description)}</div>` : ""}
+      <div class="cert-grid" style="border-radius:10px;border:1px solid var(--line);margin-bottom:16px">
+        <div class="c"><div class="k">In stock</div><div class="v">${t.inStock}</div></div>
+        <div class="c"><div class="k">Total added</div><div class="v">${t.totalAdded}</div></div>
+        ${kind
+          .totals(t)
+          .map(([k, v]) => `<div class="c"><div class="k">${k}</div><div class="v">${v}</div></div>`)
+          .join("")}
+      </div>
+
+      <div class="item-h"><b>Stock added</b><span class="muted">${t.intakes.length} entr${t.intakes.length === 1 ? "y" : "ies"}</span></div>
+      <div class="panel"><div class="panel-b flush">
+      ${
+        t.intakes.length
+          ? `<table><thead><tr><th>Date</th><th>Qty</th><th>Notes</th><th>By</th><th></th></tr></thead><tbody>
+            ${t.intakes
+              .map(
+                (i) => `<tr>
+                <td class="mono" style="font-size:12.5px;white-space:nowrap">${esc(i.intakeDate)}</td>
+                <td><b>${i.quantity}</b></td>
+                <td class="muted">${i.notes ? esc(i.notes) : "—"}</td>
+                <td class="muted">${esc(i.createdByName || "—")}</td>
+                <td style="text-align:right">${isAdmin() ? `<button class="btn sm ghost" data-undo="${i.id}" data-qty="${i.quantity}">Undo</button>` : ""}</td>
+              </tr>`,
+              )
+              .join("")}
+            </tbody></table>`
+          : `<div class="panel-b muted">No stock added yet.</div>`
+      }
+      </div></div>
+      ${kind.usageHtml(t)}`,
+    footer: `<button class="btn" data-cancel>Close</button>
+             <button class="btn primary" data-add>＋ Add stock</button>`,
+    onMount(root, close) {
+      $("[data-cancel]", root).addEventListener("click", close);
+      $("[data-add]", root).addEventListener("click", () => qtyStockModal(kind, t));
+      root.querySelectorAll("[data-open]").forEach((b) =>
+        b.addEventListener("click", () => dispatchModal(b.dataset.open)),
+      );
+      root.querySelectorAll("[data-units]").forEach((b) =>
+        b.addEventListener("click", () => {
+          close();
+          go("inventory?moduleId=" + b.dataset.units);
+        }),
+      );
+      root.querySelectorAll("[data-undo]").forEach((b) =>
+        b.addEventListener("click", async () => {
+          if (!confirm(`Undo this stock entry? ${b.dataset.qty} will be taken back out of stock.`)) return;
+          try {
+            await api(`${kind.api}/${t.id}/stock/${b.dataset.undo}`, { method: "DELETE" });
+            toast("Stock entry removed", "ok");
+            stockChanged();
+            render();
+            qtyDetailModal(kind, t.id);
+          } catch (e) {
+            toast(e.message, "err");
+          }
+        }),
+      );
+    },
+  });
+}
+
+// ------------------------------------------------------------------ resources
+// The parts units are built from (wire, antenna, screws…), stocked by quantity.
+routes.resources = async (view) => {
+  const resources = await loadResources(true);
+  setHeader(
+    "Resources",
+    `${resources.length} resource${resources.length === 1 ? "" : "s"}`,
+    `<button class="btn primary" data-new>＋ New resource</button>`,
+    (a) => a.querySelector("[data-new]").addEventListener("click", () => qtyItemModal(RESOURCE_KIND)),
+  );
+
+  if (!resources.length) {
+    view.innerHTML = emptyState(
+      "▣",
+      "No resources yet. Add the parts your units are built from (wire, antenna, screws…) with their quantity.",
+      `<button class="btn primary" id="nr">＋ New resource</button>`,
+    );
+    $("#nr", view).addEventListener("click", () => qtyItemModal(RESOURCE_KIND));
+    return;
+  }
+
+  view.innerHTML = `
+    <div class="toolbar">
+      <div class="grow search"><span class="ic">⌕</span>
+        <input id="r-q" placeholder="Search resources…"></div>
+    </div>
+    <div class="panel"><div class="panel-b flush"><table>
+      <thead><tr><th>Resource</th><th>In stock</th><th>Added</th><th>Used</th><th></th></tr></thead>
+      <tbody id="r-rows"></tbody>
+    </table></div></div>`;
+
+  const rows = $("#r-rows", view);
+  const renderRows = () => {
+    const needle = $("#r-q", view).value.trim().toLowerCase();
+    const shown = resources.filter(
+      (r) =>
+        !needle ||
+        r.name.toLowerCase().includes(needle) ||
+        r.description.toLowerCase().includes(needle),
+    );
+    rows.innerHTML = shown.length
+      ? shown
+          .map(
+            (r) => `
+        <tr>
+          <td><b>${esc(r.name)}</b>${r.description ? `<div class="muted" style="font-size:12px">${esc(r.description)}</div>` : ""}</td>
+          <td>${r.inStock ? `<b>${r.inStock}</b>` : `<span class="chip defective">0</span>`}</td>
+          <td class="muted">${r.totalAdded}</td>
+          <td class="muted">${r.totalUsed}</td>
+          <td style="text-align:right;white-space:nowrap">
+            <button class="btn sm primary" data-add="${r.id}">Add stock</button>
+            <button class="btn sm" data-view="${r.id}">Details</button>
+            <button class="btn sm ghost" data-edit="${r.id}">Edit</button>
+          </td>
+        </tr>`,
+          )
+          .join("")
+      : `<tr><td colspan="5" class="muted">No resource matches that search.</td></tr>`;
+  };
+  renderRows();
+  $("#r-q", view).addEventListener("input", renderRows);
+  rows.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    const { add, view: viewId, edit } = b.dataset;
+    if (add) qtyStockModal(RESOURCE_KIND, resources.find((r) => r.id === add));
+    else if (viewId) qtyDetailModal(RESOURCE_KIND, viewId);
+    else if (edit) qtyItemModal(RESOURCE_KIND, resources.find((r) => r.id === edit));
+  });
+};
+
+/**
+ * Rows of "resource + quantity per unit" inside `root`, for intake and unit
+ * detail. `units()` is how many units the quantities apply to (for the totals
+ * shown); `initial` rows are already taken from stock by this unit, so they
+ * count as available again. `value()` returns the API lines, or an error
+ * message string.
+ */
+function resourceEditor(root, resources, initial = [], units = () => 1) {
+  root.innerHTML = `<div data-rows></div>
+    ${
+      resources.length
+        ? `<button type="button" class="btn sm" data-add>＋ Add resource</button>`
+        : `<div class="hint" style="margin:0">No resources yet. Add them on the Resources page.</div>`
+    }`;
+  const rowsEl = $("[data-rows]", root);
+  const held = new Map(initial.map((r) => [r.resourceId, r.quantity]));
+  const rowResource = (row) => resources.find((r) => r.id === $("[data-res]", row).value);
+
+  function refresh() {
+    const n = units();
+    rowsEl.querySelectorAll(".res-line").forEach((row) => {
+      const r = rowResource(row);
+      const per = Math.max(0, Number($("[data-qty]", row).value) || 0);
+      const available = r.inStock + (held.get(r.id) || 0);
+      const total = per * n;
+      const el = $("[data-total]", row);
+      el.textContent = `${n !== 1 ? `× ${n} units = ${total} · ` : ""}${available} available`;
+      el.style.color = total > available ? "var(--err-ink)" : "";
+    });
+  }
+
+  function addRow(resourceId, qty) {
+    const row = document.createElement("div");
+    row.className = "res-line";
+    row.innerHTML = `
+      <select data-res>${resources
+        .map((r) => `<option value="${r.id}" ${r.id === resourceId ? "selected" : ""}>${esc(r.name)}</option>`)
+        .join("")}</select>
+      <input data-qty type="number" min="1" value="${qty}" title="Quantity per unit">
+      <span class="muted" data-total style="font-size:12.5px"></span>
+      <button type="button" class="btn sm ghost" data-rm>✕</button>`;
+    rowsEl.appendChild(row);
+    refresh();
+  }
+
+  rowsEl.addEventListener("input", refresh);
+  rowsEl.addEventListener("change", refresh);
+  rowsEl.addEventListener("click", (e) => {
+    if (!e.target.closest("[data-rm]")) return;
+    e.target.closest(".res-line").remove();
+    refresh();
+  });
+  const addBtn = $("[data-add]", root);
+  if (addBtn)
+    addBtn.addEventListener("click", () => {
+      const used = new Set([...rowsEl.querySelectorAll("[data-res]")].map((s) => s.value));
+      addRow((resources.find((r) => !used.has(r.id)) || resources[0]).id, 1);
+    });
+  initial.forEach((r) => addRow(r.resourceId, r.quantity));
+
+  return {
+    refresh,
+    value() {
+      const out = [];
+      const seen = new Set();
+      for (const row of rowsEl.querySelectorAll(".res-line")) {
+        const r = rowResource(row);
+        const per = Number($("[data-qty]", row).value);
+        if (!Number.isInteger(per) || per < 1) return `${r.name}: quantity must be a whole number, at least 1.`;
+        if (seen.has(r.id)) return `${r.name} is added twice. Combine those rows.`;
+        seen.add(r.id);
+        out.push({ resourceId: r.id, quantity: per });
+      }
+      return out;
+    },
+  };
+}
+
 // ----------------------------------------------------------------- give stock
 /** 'YYYY-MM-DD' plus whole months, the same way warranty end dates are computed. */
 function addMonths(dateStr, months) {
@@ -866,11 +1393,12 @@ function addMonths(dateStr, months) {
 }
 
 routes.give = async (view, params) => {
-  const modules = await loadModules(true);
-  setHeader("Give stock", "Hand units to a customer against an invoice", "");
+  const [modules, tags] = await Promise.all([loadModules(true), loadTags(true)]);
+  setHeader("Give stock", "Hand units and tags to a customer against an invoice", "");
 
   const available = modules.filter((m) => m.inStock > 0);
-  if (!available.length) {
+  const availableTags = tags.filter((t) => t.inStock > 0);
+  if (!available.length && !availableTags.length) {
     view.innerHTML = emptyState(
       "－",
       "Nothing is in stock right now. Add stock first.",
@@ -903,7 +1431,7 @@ routes.give = async (view, params) => {
           <input id="g-date" type="date" value="${today}"></label>
       </div>
       <div class="row">
-        <label class="field"><span class="lab">Validity date</span>
+        <label class="field" id="g-valid-wrap"><span class="lab">Validity date</span>
           <input id="g-valid" type="date">
           <div class="hint" id="g-valid-hint"></div></label>
         <label class="field"><span class="lab">Notes <span class="muted">(optional)</span></span>
@@ -915,7 +1443,25 @@ routes.give = async (view, params) => {
       <span class="muted" id="g-summary" style="font-size:12.5px"></span></div>
       <div class="panel-b">
         <div class="give-lines" id="g-lines"></div>
-        <button class="btn" id="g-add">＋ Add another product</button>
+        ${
+          available.length
+            ? `<div class="muted" id="g-none" style="margin-bottom:12px" hidden>No products added. Add one, or give only tags below.</div>
+               <button class="btn" id="g-add">＋ Add product</button>`
+            : `<div class="muted">No modules are in stock. You can still give tags below.</div>`
+        }
+      </div>
+    </div>
+
+    <div class="panel"><div class="panel-h"><h2>Tags</h2>
+      <span class="muted" id="g-tag-summary" style="font-size:12.5px"></span></div>
+      <div class="panel-b">
+        <div class="give-lines" id="g-tags"></div>
+        ${
+          availableTags.length
+            ? `<button class="btn" id="g-add-tag">＋ Add tag</button>
+               <div class="hint">Optional. Tags have no serials or warranty, just a quantity.</div>`
+            : `<div class="muted">No tags are in stock.</div>`
+        }
       </div>
     </div>
 
@@ -923,13 +1469,18 @@ routes.give = async (view, params) => {
     <button class="btn primary" id="g-submit">Give stock</button>`;
 
   // The validity date follows given date + the longest warranty among the
-  // chosen modules, until edited by hand.
+  // chosen modules, until edited by hand. Tags carry no warranty, so with
+  // only tags there is no validity date at all.
   let validEdited = false;
   const lines = [];
+  const tagLines = [];
   let lineSeq = 0;
   const linesEl = $("#g-lines", view);
+  const tagsEl = $("#g-tags", view);
 
   function syncValidity() {
+    $("#g-valid-wrap", view).hidden = !lines.length;
+    if (!lines.length) return;
     const months = Math.max(...lines.map((l) => l.module().warrantyMonths));
     const given = $("#g-date", view).value || today;
     if (!validEdited) $("#g-valid", view).value = addMonths(given, months);
@@ -940,10 +1491,15 @@ routes.give = async (view, params) => {
 
   function syncSummary() {
     const units = lines.reduce((n, l) => n + l.count(), 0);
-    $("#g-summary", view).textContent =
-      `${lines.length} product${lines.length === 1 ? "" : "s"} · ${units} unit${units === 1 ? "" : "s"}`;
-    // A hand-over always has at least one line.
-    lines.forEach((l) => (l.removeBtn.hidden = lines.length === 1));
+    $("#g-summary", view).textContent = lines.length
+      ? `${lines.length} product${lines.length === 1 ? "" : "s"} · ${units} unit${units === 1 ? "" : "s"}`
+      : "";
+    const none = $("#g-none", view);
+    if (none) none.hidden = lines.length > 0;
+    const qty = tagLines.reduce((n, l) => n + l.count(), 0);
+    $("#g-tag-summary", view).textContent = tagLines.length
+      ? `${qty} tag${qty === 1 ? "" : "s"}`
+      : "";
   }
 
   const changed = () => {
@@ -965,14 +1521,32 @@ routes.give = async (view, params) => {
     changed();
   }
 
-  $("#g-add", view).addEventListener("click", () => addLine());
+  function addTagLine(tagId) {
+    const used = new Set(tagLines.map((l) => l.tag().id));
+    const start = tagId || (availableTags.find((t) => !used.has(t.id)) || availableTags[0]).id;
+    const line = tagLine(availableTags, start, changed, () => {
+      tagLines.splice(tagLines.indexOf(line), 1);
+      line.el.remove();
+      changed();
+    });
+    tagLines.push(line);
+    tagsEl.appendChild(line.el);
+    changed();
+  }
+
+  if (available.length) $("#g-add", view).addEventListener("click", () => addLine());
+  if (availableTags.length) $("#g-add-tag", view).addEventListener("click", () => addTagLine());
   $("#g-date", view).addEventListener("input", syncValidity);
   $("#g-valid", view).addEventListener("input", (e) => {
     validEdited = !!e.target.value;
     syncValidity();
   });
 
-  addLine(params.moduleId);
+  // Arriving from a tag's page starts with that tag; otherwise with a product.
+  const startTag = params.tagId && availableTags.find((t) => t.id === params.tagId);
+  if (startTag) addTagLine(startTag.id);
+  else if (available.length) addLine(params.moduleId);
+  else addTagLine();
 
   $("#g-submit", view).addEventListener("click", async () => {
     const errEl = $("#g-err", view);
@@ -987,14 +1561,16 @@ routes.give = async (view, params) => {
       gstNo: $("#g-gst", view).value.trim().toUpperCase() || null,
       invoiceNo: $("#g-inv", view).value.trim(),
       givenDate: $("#g-date", view).value,
-      validUntil: $("#g-valid", view).value || null,
+      validUntil: lines.length ? $("#g-valid", view).value || null : null,
       notes: $("#g-notes", view).value.trim(),
       items: [],
+      tags: [],
     };
     if (!body.customerName) return fail("Enter the customer name.");
     if (!body.customerPhone) return fail("Enter the customer phone.");
     if (!body.invoiceNo) return fail("Enter the invoice number.");
     if (!body.givenDate) return fail("Enter the given date.");
+    if (!lines.length && !tagLines.length) return fail("Add a product or a tag to give.");
     const seen = new Set();
     for (const [i, line] of lines.entries()) {
       const m = line.module();
@@ -1006,18 +1582,24 @@ routes.give = async (view, params) => {
       if (typeof item === "string") return fail(`Product ${i + 1} (${m.name}): ${item}`);
       body.items.push(item);
     }
+    const seenTags = new Set();
+    for (const line of tagLines) {
+      const t = line.tag();
+      if (seenTags.has(t.id)) {
+        return fail(`Tag ${t.name} is added twice. Remove one line, or give all of it on one line.`);
+      }
+      seenTags.add(t.id);
+      const item = line.item();
+      if (typeof item === "string") return fail(`Tag ${t.name}: ${item}`);
+      body.tags.push(item);
+    }
 
     const btn = $("#g-submit", view);
     btn.disabled = true;
     btn.textContent = "Saving…";
     try {
       const d = await api("/dispatches", { method: "POST", body: JSON.stringify(body) });
-      toast(
-        `Gave ${d.quantity} unit${d.quantity === 1 ? "" : "s"}` +
-          (d.items.length > 1 ? ` of ${d.items.length} products` : "") +
-          ` to ${d.customerName}`,
-        "ok",
-      );
+      toast(`Gave ${dispatchSummary(d)} to ${d.customerName}`, "ok");
       stockChanged();
       go("dispatches?id=" + d.id);
     } catch (e) {
@@ -1027,6 +1609,73 @@ routes.give = async (view, params) => {
     }
   });
 };
+
+/** "3 units of 2 products and 500 tags" — what a hand-over gave. */
+function dispatchSummary(d) {
+  const parts = [];
+  if (d.items.length) {
+    parts.push(
+      `${d.quantity} unit${d.quantity === 1 ? "" : "s"}` +
+        (d.items.length > 1 ? ` of ${d.items.length} products` : ""),
+    );
+  }
+  if (d.tags.length) parts.push(`${d.tagQuantity} tag${d.tagQuantity === 1 ? "" : "s"}`);
+  return parts.join(" and ");
+}
+
+/**
+ * One tag line on the Give stock page: a tag and a quantity. `item()` returns
+ * the API tag line, or an error message string.
+ */
+function tagLine(available, tagId, onChange, onRemove) {
+  const el = document.createElement("div");
+  el.className = "give-line";
+  el.innerHTML = `
+    <div class="give-line-h"><b class="n">Tag</b>
+      <button type="button" class="btn sm ghost" data-remove>✕ Remove</button></div>
+    <div class="row">
+      <label class="field"><span class="lab">Tag</span>
+        <select data-tag>
+          ${available
+            .map(
+              (t) =>
+                `<option value="${t.id}" ${t.id === tagId ? "selected" : ""}>${esc(t.name)} (${t.inStock} in stock)</option>`,
+            )
+            .join("")}
+        </select></label>
+      <label class="field"><span class="lab">Quantity</span>
+        <input data-qty type="number" min="1" value="1">
+        <div class="hint" data-hint></div></label>
+    </div>`;
+
+  const sel = $("[data-tag]", el);
+  const qtyInput = $("[data-qty]", el);
+  const tag = () => available.find((t) => t.id === sel.value);
+  const syncHint = () => {
+    qtyInput.max = tag().inStock;
+    $("[data-hint]", el).textContent = `${tag().inStock} in stock.`;
+  };
+  sel.addEventListener("change", () => {
+    syncHint();
+    onChange();
+  });
+  qtyInput.addEventListener("input", onChange);
+  $("[data-remove]", el).addEventListener("click", onRemove);
+  syncHint();
+
+  return {
+    el,
+    tag,
+    count: () => Math.max(0, Number(qtyInput.value) || 0),
+    item() {
+      const t = tag();
+      const qty = Number(qtyInput.value);
+      if (!Number.isInteger(qty) || qty < 1) return "quantity must be a whole number, at least 1.";
+      if (qty > t.inStock) return `only ${t.inStock} in stock.`;
+      return { tagId: t.id, quantity: qty };
+    },
+  };
+}
 
 /**
  * One product line on the Give stock page: a product -> module picker, then
@@ -1192,7 +1841,7 @@ routes.dispatches = async (view, params) => {
   view.innerHTML = `
     <div class="toolbar">
       <div class="grow search"><span class="ic">⌕</span>
-        <input id="d-q" placeholder="Search invoice, customer, phone, GST no, product, module, serial…" value="${esc(q)}"></div>
+        <input id="d-q" placeholder="Search invoice, customer, phone, GST no, product, module, tag, serial…" value="${esc(q)}"></div>
       ${stockFilterHtml("d", products, modules, productId, moduleId)}
     </div>
 
@@ -1200,7 +1849,7 @@ routes.dispatches = async (view, params) => {
     ${
       data.items.length
         ? `<table>
-        <thead><tr><th>Given</th><th>Invoice</th><th>Customer</th><th>GST no</th><th>Product / module</th><th>Qty</th><th>Valid until</th><th></th></tr></thead>
+        <thead><tr><th>Given</th><th>Invoice</th><th>Customer</th><th>GST no</th><th>Products / tags</th><th>Qty</th><th>Valid until</th><th></th></tr></thead>
         <tbody>
           ${data.items
             .map(
@@ -1212,11 +1861,17 @@ routes.dispatches = async (view, params) => {
               <td class="mono" style="font-size:12.5px">${d.gstNo ? esc(d.gstNo) : `<span class="muted">—</span>`}</td>
               <td>${d.items
                 .map((i) => `<div class="item-line">${moduleCell(i)}${d.items.length > 1 ? `<span class="muted">× ${i.quantity}</span>` : ""}</div>`)
+                .join("")}${d.tags
+                .map((t) => `<div class="item-line"><span class="chip tag">${esc(t.tagName)}</span><span class="muted">× ${t.quantity}</span></div>`)
                 .join("")}</td>
-              <td><b>${d.quantity}</b></td>
+              <td>${d.items.length ? `<b>${d.quantity}</b>` : ""}${
+                d.tags.length
+                  ? `<div class="muted" style="font-size:12px;white-space:nowrap">${d.tagQuantity} tag${d.tagQuantity === 1 ? "" : "s"}</div>`
+                  : ""
+              }</td>
               <td class="mono" style="font-size:12.5px;white-space:nowrap">${d.validUntil ? esc(d.validUntil) : `<span class="muted">—</span>`}</td>
               <td style="text-align:right;white-space:nowrap">
-                <button class="btn sm" data-pdf="${d.id}" data-inv="${esc(d.invoiceNo)}" title="Download warranty card PDF">⤓ PDF</button>
+                <button class="btn sm" data-pdf="${d.id}" data-inv="${esc(d.invoiceNo)}" title="Download PDF">⤓ PDF</button>
                 <button class="btn sm ghost" data-open="${d.id}">Details</button></td>
             </tr>`,
             )
@@ -1289,10 +1944,10 @@ async function dispatchModal(id) {
         <div class="c"><div class="k">Phone</div><div class="v mono">${esc(d.customerPhone)}</div></div>
         <div class="c"><div class="k">GST no</div><div class="v mono">${d.gstNo ? esc(d.gstNo) : "—"}</div></div>
         <div class="c"><div class="k">Given date</div><div class="v mono">${esc(d.givenDate)}</div></div>
-        <div class="c"><div class="k">Valid until</div><div class="v mono">${d.validUntil ? esc(d.validUntil) : "—"}</div></div>
+        ${d.items.length ? `<div class="c"><div class="k">Valid until</div><div class="v mono">${d.validUntil ? esc(d.validUntil) : "—"}</div></div>` : ""}
       </div>
       <div class="lab" style="font-size:12.5px;font-weight:600;color:var(--ink-soft);margin-bottom:6px">
-        ${d.quantity} unit${d.quantity === 1 ? "" : "s"} given${d.items.length > 1 ? ` across ${d.items.length} products` : ""}</div>
+        ${esc(dispatchSummary(d))} given</div>
       ${d.items
         .map((i) => {
           const units = d.units.filter((u) => u.moduleId === i.moduleId);
@@ -1313,6 +1968,20 @@ async function dispatchModal(id) {
       </div>`;
         })
         .join("")}
+      ${
+        d.tags.length
+          ? `<div class="item-h"><b>Tags</b><span class="muted">${d.tagQuantity} tag${d.tagQuantity === 1 ? "" : "s"}</span></div>
+      <div class="pick-list" style="margin-bottom:12px">
+        ${d.tags
+          .map(
+            (t) => `<div class="pick-row" style="cursor:default">
+              <span class="chip tag">${esc(t.tagName)}</span>
+              <span class="d mono">× ${t.quantity}</span></div>`,
+          )
+          .join("")}
+      </div>`
+          : ""
+      }
       ${d.notes ? `<div class="hint" style="margin-top:12px">Notes: ${esc(d.notes)}</div>` : ""}
       <div class="hint" style="margin-top:8px">Entered${d.createdByName ? " by " + esc(d.createdByName) : ""} on ${esc(new Date(d.createdAt).toLocaleString())}</div>`,
     footer: `
@@ -1327,10 +1996,12 @@ async function dispatchModal(id) {
       const del = $("[data-del]", root);
       if (del)
         del.addEventListener("click", async () => {
-          if (!confirm(`Delete this record${d.items.length > 1 ? ` (all ${d.items.length} products)` : ""} and put its sold units back in stock?`)) return;
+          const lineCount = d.items.length + d.tags.length;
+          const what = [d.items.length ? "sold units" : "", d.tags.length ? "tags" : ""].filter(Boolean).join(" and ");
+          if (!confirm(`Delete this record${lineCount > 1 ? ` (all ${lineCount} lines)` : ""} and put its ${what} back in stock?`)) return;
           try {
             await api("/dispatches/" + d.id, { method: "DELETE" });
-            toast("Record deleted, units back in stock", "ok");
+            toast("Record deleted, stock returned", "ok");
             stockChanged();
             close();
             go("dispatches");
@@ -1428,14 +2099,14 @@ let pdfUrl = null;
 async function pdfModal(d) {
   let file;
   try {
-    file = await fetchFile(`/dispatches/${d.id}/pdf`, `warranty-card-${d.invoiceNo}.pdf`);
+    file = await fetchFile(`/dispatches/${d.id}/pdf`, `${d.items.length ? "warranty-card" : "delivery-note"}-${d.invoiceNo}.pdf`);
   } catch (e) {
     return toast(e.message, "err");
   }
   if (pdfUrl) URL.revokeObjectURL(pdfUrl);
   pdfUrl = URL.createObjectURL(file.blob);
   openModal({
-    title: `Warranty card · ${d.invoiceNo}`,
+    title: `${d.items.length ? "Warranty card" : "Delivery note"} · ${d.invoiceNo}`,
     wide: true,
     body: `<iframe class="pdf-frame" src="${pdfUrl}" title="Warranty card PDF"></iframe>
       <div class="hint">Can't see the PDF? Use “Open in new tab” or “Download”.</div>`,
@@ -1635,6 +2306,8 @@ function unitModal(u, onSaved) {
       ${u.soldTo ? `<div class="hint">Sold to ${esc(u.soldTo)}${u.soldDate ? " on " + esc(u.soldDate) : ""}</div>` : ""}
       <label class="field" style="margin-top:14px"><span class="lab">Notes</span>
         <input id="u-notes" maxlength="2000" value="${esc(u.notes)}"></label>
+      <div class="field"><span class="lab">Resources used <span class="muted">(per this unit)</span></span>
+        <div id="u-res"><div class="muted">Loading…</div></div></div>
       <div class="hint" id="u-err" style="color:var(--err-ink)"></div>`,
     footer: `${isAdmin() && !u.dispatchId ? `<button class="btn danger" data-del style="margin-right:auto">Delete</button>` : ""}
              <button class="btn" data-cancel>Close</button>
@@ -1644,7 +2317,7 @@ function unitModal(u, onSaved) {
       const del = $("[data-del]", root);
       if (del)
         del.addEventListener("click", async () => {
-          if (!confirm(`Delete unit "${u.internalSerial}"? This cannot be undone.`)) return;
+          if (!confirm(`Delete unit "${u.internalSerial}"? Its resources go back in stock. This cannot be undone.`)) return;
           try {
             await api("/units/" + u.id, { method: "DELETE" });
             toast("Unit deleted", "ok");
@@ -1655,9 +2328,30 @@ function unitModal(u, onSaved) {
             $("#u-err", root).textContent = ex.message;
           }
         });
+      // What the unit was built with; editing it moves resource stock by the difference.
+      let resEditor = null;
+      let savedRes = "[]";
+      const resKey = (lines) =>
+        JSON.stringify([...lines].sort((a, b) => a.resourceId.localeCompare(b.resourceId)));
+      Promise.all([loadResources(true), api(`/units/${u.id}/resources`)])
+        .then(([resources, used]) => {
+          savedRes = resKey(used.map(({ resourceId, quantity }) => ({ resourceId, quantity })));
+          resEditor = resourceEditor($("#u-res", root), resources, used);
+        })
+        .catch((ex) => ($("#u-res", root).textContent = ex.message));
+
       $("[data-save]", root).addEventListener("click", async (e) => {
         const errEl = $("#u-err", root);
         errEl.textContent = "";
+        let resLines = null;
+        if (resEditor) {
+          const v = resEditor.value();
+          if (typeof v === "string") {
+            errEl.textContent = v;
+            return;
+          }
+          if (resKey(v) !== savedRes) resLines = v;
+        }
         const internal = $("#u-int", root).value.trim();
         const mfr = $("#u-mfr", root).value.trim() || null;
         const notes = $("#u-notes", root).value.trim();
@@ -1669,10 +2363,19 @@ function unitModal(u, onSaved) {
         if (internal !== u.internalSerial) patch.internalSerial = internal;
         if (mfr !== (u.manufacturerSerial || null)) patch.manufacturerSerial = mfr;
         if (notes !== u.notes) patch.notes = notes;
-        if (!Object.keys(patch).length) return close();
+        if (!Object.keys(patch).length && !resLines) return close();
         e.target.disabled = true;
         try {
-          await api("/units/" + u.id, { method: "PATCH", body: JSON.stringify(patch) });
+          if (Object.keys(patch).length) {
+            await api("/units/" + u.id, { method: "PATCH", body: JSON.stringify(patch) });
+          }
+          if (resLines) {
+            await api(`/units/${u.id}/resources`, {
+              method: "PUT",
+              body: JSON.stringify({ resources: resLines }),
+            });
+            stockChanged();
+          }
           toast("Unit updated", "ok");
           close();
           if (onSaved) onSaved();

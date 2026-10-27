@@ -12,6 +12,8 @@ import { moduleRoutes } from "./modules/modules/module.routes";
 import { unitRoutes } from "./modules/units/unit.routes";
 import { dispatchRoutes } from "./modules/dispatches/dispatch.routes";
 import { warrantyRoutes } from "./modules/warranty/warranty.routes";
+import { tagRoutes } from "./modules/tags/tag.routes";
+import { resourceRoutes } from "./modules/resources/resource.routes";
 import { settingsRoutes } from "./modules/settings/settings.routes";
 import { statsRoutes } from "./modules/stats/stats.routes";
 
@@ -42,6 +44,8 @@ export function createApp() {
   app.use("/api/products", productRoutes);
   app.use("/api/modules", moduleRoutes);
   app.use("/api/units", unitRoutes);
+  app.use("/api/tags", tagRoutes);
+  app.use("/api/resources", resourceRoutes);
   app.use("/api/dispatches", dispatchRoutes);
   app.use("/api/warranty", warrantyRoutes);
   app.use("/api/settings", settingsRoutes);

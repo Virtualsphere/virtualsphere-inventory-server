@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { RowDataPacket } from "mysql2/promise";
 import { pool, type Queryable } from "../../db/pool";
-import type { Dispatch, DispatchItem } from "../../types";
+import type { Dispatch, DispatchItem, DispatchTag } from "../../types";
 
 interface DispatchRow extends RowDataPacket {
   id: string;
@@ -40,7 +40,19 @@ function mapItem(row: DispatchItemRow): DispatchItem {
   };
 }
 
-function mapDispatch(row: DispatchRow, items: DispatchItem[]): Dispatch {
+interface DispatchTagRow extends RowDataPacket {
+  id: string;
+  dispatch_id: string;
+  tag_id: string;
+  tag_name: string;
+  quantity: number;
+}
+
+function mapDispatch(
+  row: DispatchRow,
+  items: DispatchItem[],
+  tags: DispatchTag[],
+): Dispatch {
   return {
     id: row.id,
     invoiceNo: row.invoice_no,
@@ -49,6 +61,8 @@ function mapDispatch(row: DispatchRow, items: DispatchItem[]): Dispatch {
     gstNo: row.gst_no,
     quantity: items.reduce((n, i) => n + i.quantity, 0),
     items,
+    tagQuantity: tags.reduce((n, t) => n + t.quantity, 0),
+    tags,
     givenDate: row.given_date,
     validUntil: row.valid_until,
     notes: row.notes,
@@ -82,6 +96,32 @@ async function itemsByDispatch(
     [dispatchIds],
   );
   for (const row of rows) byId.get(row.dispatch_id)!.push(mapItem(row));
+  return byId;
+}
+
+/** The tag lines of the given hand-overs, grouped by dispatch id, by tag name. */
+async function tagsByDispatch(
+  conn: Queryable,
+  dispatchIds: string[],
+): Promise<Map<string, DispatchTag[]>> {
+  const byId = new Map<string, DispatchTag[]>(dispatchIds.map((id) => [id, []]));
+  if (dispatchIds.length === 0) return byId;
+  const [rows] = await conn.query<DispatchTagRow[]>(
+    `SELECT g.id, g.dispatch_id, g.tag_id, g.quantity, t.name AS tag_name
+     FROM dispatch_tags g
+     JOIN tags t ON t.id = g.tag_id
+     WHERE g.dispatch_id IN (?)
+     ORDER BY t.name ASC`,
+    [dispatchIds],
+  );
+  for (const row of rows) {
+    byId.get(row.dispatch_id)!.push({
+      id: row.id,
+      tagId: row.tag_id,
+      tagName: row.tag_name,
+      quantity: row.quantity,
+    });
+  }
   return byId;
 }
 
@@ -167,6 +207,18 @@ export async function insertDispatchItem(
   );
 }
 
+export async function insertDispatchTag(
+  conn: Queryable,
+  dispatchId: string,
+  tagId: string,
+  quantity: number,
+): Promise<void> {
+  await conn.query(
+    "INSERT INTO dispatch_tags (id, dispatch_id, tag_id, quantity) VALUES (?, ?, ?, ?)",
+    [randomUUID(), dispatchId, tagId, quantity],
+  );
+}
+
 export async function findDispatchById(
   id: string,
   conn: Queryable = pool,
@@ -176,8 +228,11 @@ export async function findDispatchById(
     [id],
   );
   if (!rows[0]) return null;
-  const items = await itemsByDispatch(conn, [id]);
-  return mapDispatch(rows[0], items.get(id)!);
+  const [items, tags] = await Promise.all([
+    itemsByDispatch(conn, [id]),
+    tagsByDispatch(conn, [id]),
+  ]);
+  return mapDispatch(rows[0], items.get(id)!, tags.get(id)!);
 }
 
 export interface ListDispatchesResult {
@@ -221,10 +276,12 @@ export async function listDispatches(opts: {
                    JOIN products sp ON sp.id = sm.product_id
                    WHERE si.dispatch_id = d.id
                      AND (sp.name LIKE ? OR sm.name LIKE ? OR sm.sku LIKE ?))
+        OR EXISTS (SELECT 1 FROM dispatch_tags tg JOIN tags st ON st.id = tg.tag_id
+                   WHERE tg.dispatch_id = d.id AND st.name LIKE ?)
         OR EXISTS (SELECT 1 FROM units su WHERE su.dispatch_id = d.id
                    AND (su.internal_serial LIKE ? OR su.manufacturer_serial LIKE ?)))`,
     );
-    params.push(like, like, like, like, like, like, like, like, like);
+    params.push(like, like, like, like, like, like, like, like, like, like);
   }
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
 
@@ -238,10 +295,14 @@ export async function listDispatches(opts: {
      LIMIT ? OFFSET ?`,
     [...params, opts.limit, opts.offset],
   );
-  const items = await itemsByDispatch(pool, rows.map((r) => r.id));
+  const ids = rows.map((r) => r.id);
+  const [items, tags] = await Promise.all([
+    itemsByDispatch(pool, ids),
+    tagsByDispatch(pool, ids),
+  ]);
 
   return {
-    items: rows.map((r) => mapDispatch(r, items.get(r.id)!)),
+    items: rows.map((r) => mapDispatch(r, items.get(r.id)!, tags.get(r.id)!)),
     total: Number(countRows[0]?.["count"] ?? 0),
     limit: opts.limit,
     offset: opts.offset,

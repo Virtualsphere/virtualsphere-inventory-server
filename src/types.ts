@@ -81,7 +81,95 @@ export interface DispatchItem {
   quantity: number;
 }
 
-/** Stock given out to a customer: one invoice / customer, one or more modules. */
+/** A tag: stock counted by quantity only — no serials, no warranty. */
+export interface Tag {
+  id: string;
+  name: string;
+  description: string;
+  inStock: number;
+  /** Sum of every stock intake. */
+  totalAdded: number;
+  /** Sum given out on hand-overs. */
+  totalGiven: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** One "add stock" of a tag or resource. */
+export interface StockIntake {
+  id: string;
+  quantity: number;
+  intakeDate: string;
+  notes: string;
+  createdByName: string | null;
+  createdAt: string;
+}
+
+/** One hand-over a tag went out on. */
+export interface TagGiven {
+  dispatchId: string;
+  invoiceNo: string;
+  customerName: string;
+  givenDate: string;
+  quantity: number;
+}
+
+/** A tag with its stock history, newest first. */
+export interface TagDetail extends Tag {
+  intakes: StockIntake[];
+  given: TagGiven[];
+}
+
+/** A resource: a part units are built from, stocked by quantity only. */
+export interface Resource {
+  id: string;
+  name: string;
+  description: string;
+  inStock: number;
+  /** Sum of every stock intake. */
+  totalAdded: number;
+  /** Sum used by units. */
+  totalUsed: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** How much of a resource one module's units used, in total. */
+export interface ResourceUsage {
+  moduleId: string;
+  moduleName: string;
+  sku: string;
+  productName: string;
+  /** Units that used this resource. */
+  units: number;
+  quantity: number;
+}
+
+/** A resource with its stock history: intakes newest first, usage by module. */
+export interface ResourceDetail extends Resource {
+  intakes: StockIntake[];
+  usage: ResourceUsage[];
+}
+
+/** How much of one resource a unit was built with. */
+export interface UnitResource {
+  resourceId: string;
+  resourceName: string;
+  quantity: number;
+}
+
+/** One tag given in a hand-over. */
+export interface DispatchTag {
+  id: string;
+  tagId: string;
+  tagName: string;
+  quantity: number;
+}
+
+/**
+ * Stock given out to a customer: one invoice / customer, and one or more
+ * modules and/or tags.
+ */
 export interface Dispatch {
   id: string;
   invoiceNo: string;
@@ -91,6 +179,9 @@ export interface Dispatch {
   /** Total units across all items. */
   quantity: number;
   items: DispatchItem[];
+  /** Total tags across all tag lines. */
+  tagQuantity: number;
+  tags: DispatchTag[];
   givenDate: string;
   validUntil: string | null;
   notes: string;

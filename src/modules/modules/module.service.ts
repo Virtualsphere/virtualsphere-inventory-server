@@ -1,7 +1,10 @@
+import { withTransaction } from "../../db/pool";
 import { conflict, isUniqueViolation as isUnique, notFound } from "../../lib/errors";
 import type { Module, ModuleWithCounts } from "../../types";
 import { getSettings } from "../settings/settings.repo";
 import { findProductById } from "../products/product.repo";
+import { moduleResourceTotals } from "../resources/resource.repo";
+import { moveResources } from "../resources/resource.service";
 import { syncNextSeq } from "../units/unit.service";
 import {
   deleteModuleRow,
@@ -89,7 +92,16 @@ export async function updateModule(
   }
 }
 
+/**
+ * Delete a module and all its units. Resources used by units that were never
+ * given out go back in stock; those given out stay used.
+ */
 export async function deleteModule(id: string): Promise<void> {
-  const ok = await deleteModuleRow(id);
-  if (!ok) throw notFound("Module");
+  await withTransaction(async (conn) => {
+    // The module lock intake takes, so no units are added meanwhile.
+    await conn.query("SELECT id FROM modules WHERE id = ? FOR UPDATE", [id]);
+    const used = await moduleResourceTotals(conn, id);
+    await moveResources(conn, new Map(used.map((r) => [r.resourceId, r.quantity])));
+    if (!(await deleteModuleRow(id, conn))) throw notFound("Module");
+  });
 }
