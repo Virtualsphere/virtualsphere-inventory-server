@@ -197,7 +197,7 @@ function emptyState(icon, text, actionHtml) {
 
 // --------------------------------------------------------------- shared state
 // products: the top-level groups; modules: the stocked items, each in a product.
-const state = { settings: null, products: null, modules: null, tags: null, resources: null, user: null };
+const state = { settings: null, products: null, modules: null, tags: null, tagCategories: null, resources: null, user: null };
 
 async function loadSettings(force) {
   if (!state.settings || force) state.settings = await api("/settings");
@@ -213,10 +213,15 @@ async function loadModules(force) {
   if (!state.modules || force) state.modules = await api("/modules");
   return state.modules;
 }
-/** All tags, by name. Tags are stocked by quantity only. */
+/** All tags, by category then name. Tags are stocked by quantity only. */
 async function loadTags(force) {
   if (!state.tags || force) state.tags = await api("/tags");
   return state.tags;
+}
+/** Tag categories (Tag, RS232 Cable…) by name; admins manage them in Settings. */
+async function loadTagCategories(force) {
+  if (!state.tagCategories || force) state.tagCategories = await api("/tag-categories");
+  return state.tagCategories;
 }
 /** All resources (parts units are built from), by name. */
 async function loadResources(force) {
@@ -228,15 +233,34 @@ function stockChanged() {
   state.products = null;
   state.modules = null;
   state.tags = null;
+  state.tagCategories = null;
   state.resources = null;
 }
+
+/**
+ * Products are one of two kinds. Antenna products hold antenna models, which
+ * are stocked and given exactly like modules (serials, warranty, resources);
+ * the API calls both "modules" and tells them apart by `kind`.
+ */
+const KINDS = {
+  module: {
+    title: "Products", item: "module", Item: "Module", items: "modules", icon: "▤",
+    productPh: "e.g. RFID Reader Kit", itemPh: "e.g. VLD1030 module", skuPh: "VLD1030",
+    empty: "No products yet. Create a product, then add its modules to start tracking units.",
+  },
+  antenna: {
+    title: "Antennas", item: "antenna", Item: "Antenna", items: "antennas", icon: "⌁",
+    productPh: "e.g. UHF Antennas", itemPh: "e.g. 9 dBi circular", skuPh: "ANT-9C",
+    empty: "No antennas yet. Create an antenna product (a group, e.g. UHF Antennas), then add its antenna models to start tracking units.",
+  },
+};
 
 /** A Product + Module select pair (ids `${prefix}-product` / `${prefix}-module`). */
 function modulePickerHtml(prefix) {
   return `<div class="row">
       <label class="field"><span class="lab">Product</span>
         <select id="${prefix}-product"></select></label>
-      <label class="field"><span class="lab">Module</span>
+      <label class="field"><span class="lab" id="${prefix}-module-lab">Module</span>
         <select id="${prefix}-module"></select></label>
     </div>`;
 }
@@ -248,15 +272,28 @@ function modulePickerHtml(prefix) {
 function bindModulePicker(root, prefix, modules, selectedId, onChange) {
   const pSel = $(`#${prefix}-product`, root);
   const mSel = $(`#${prefix}-module`, root);
-  const products = [...new Map(modules.map((m) => [m.productId, m.productName]))];
+  const lab = $(`#${prefix}-module-lab`, root);
+  const products = [...new Map(modules.map((m) => [m.productId, m]))].map(([id, m]) => ({
+    id,
+    name: m.productName,
+    kind: m.kind,
+  }));
   const start = modules.find((m) => m.id === selectedId) || modules[0];
-  pSel.innerHTML = products
-    .map(
-      ([id, name]) =>
-        `<option value="${id}" ${id === start.productId ? "selected" : ""}>${esc(name)}</option>`,
-    )
-    .join("");
+  const option = (p) =>
+    `<option value="${p.id}" ${p.id === start.productId ? "selected" : ""}>${esc(p.name)}</option>`;
+  // Module and antenna products in their own groups when both are offered.
+  const kinds = Object.keys(KINDS).filter((k) => products.some((p) => p.kind === k));
+  pSel.innerHTML =
+    kinds.length > 1
+      ? kinds
+          .map(
+            (k) =>
+              `<optgroup label="${KINDS[k].title}">${products.filter((p) => p.kind === k).map(option).join("")}</optgroup>`,
+          )
+          .join("")
+      : products.map(option).join("");
   const fillModules = (keepId) => {
+    lab.textContent = KINDS[products.find((p) => p.id === pSel.value).kind].Item;
     mSel.innerHTML = modules
       .filter((m) => m.productId === pSel.value)
       .map(
@@ -285,7 +322,7 @@ function stockFilterHtml(prefix, products, modules, productId, moduleId) {
           .join("")}
       </select>
       <select id="${prefix}-module" style="width:auto">
-        <option value="">All modules</option>
+        <option value="">All modules &amp; antennas</option>
         ${mods
           .map(
             (m) =>
@@ -297,7 +334,7 @@ function stockFilterHtml(prefix, products, modules, productId, moduleId) {
 
 /** Product name over "module · SKU", for table cells. */
 function moduleCell(x) {
-  return `<b>${esc(x.productName)}</b>
+  return `<b>${esc(x.productName)}</b>${x.kind === "antenna" ? ` <span class="chip tag">Antenna</span>` : ""}
     <div class="muted" style="font-size:12px">${esc(x.moduleName)} · <span class="mono">${esc(x.sku)}</span></div>`;
 }
 
@@ -324,8 +361,7 @@ async function render() {
   } catch (err) {
     view.innerHTML = `<div class="banner err">${esc(err.message || "Failed to load")}</div>`;
   }
-  $("#sidebar").classList.remove("open");
-  $("#scrim").classList.remove("on");
+  setDrawer(false);
 }
 
 function go(route) {
@@ -349,6 +385,7 @@ routes.dashboard = async (view) => {
   const kpis = [
     ["Products", t.products, false],
     ["Modules", t.modules, false],
+    ["Antennas", t.antennas, false],
     ["Total units", t.units, false],
     ["In stock", t.inStock, false],
     ["Sold", t.sold, false],
@@ -394,7 +431,7 @@ routes.dashboard = async (view) => {
               ? `<table><tbody>${low
                   .map(
                     (m) =>
-                      `<tr><td>${moduleCell({ productName: m.productName, moduleName: m.name, sku: m.sku })}</td>
+                      `<tr><td>${moduleCell({ productName: m.productName, moduleName: m.name, sku: m.sku, kind: m.kind })}</td>
                        <td style="text-align:right"><span class="chip ${m.inStock === 0 ? "defective" : "returned"}">${m.inStock} in stock</span></td></tr>`,
                   )
                   .join("")}</tbody></table>`
@@ -428,22 +465,29 @@ routes.dashboard = async (view) => {
 
 // ------------------------------------------------------------------- products
 // A product groups several modules; stock is added to and given from modules.
-routes.products = async (view) => {
-  const [products, modules] = await Promise.all([loadProducts(true), loadModules(true)]);
+routes.products = (view) => productsPage(view, "module");
+routes.antennas = (view) => productsPage(view, "antenna");
+
+/** The Products page, or the Antennas page: one `kind` of products and their items. */
+async function productsPage(view, kind) {
+  const K = KINDS[kind];
+  const [allProducts, allModules] = await Promise.all([loadProducts(true), loadModules(true)]);
+  const products = allProducts.filter((p) => p.kind === kind);
+  const modules = allModules.filter((m) => m.kind === kind);
   setHeader(
-    "Products",
-    `${products.length} product${products.length === 1 ? "" : "s"} · ${modules.length} module${modules.length === 1 ? "" : "s"}`,
+    K.title,
+    `${products.length} product${products.length === 1 ? "" : "s"} · ${modules.length} ${modules.length === 1 ? K.item : K.items}`,
     `<button class="btn primary" data-new>＋ New product</button>`,
-    (a) => a.querySelector("[data-new]").addEventListener("click", () => productModal()),
+    (a) => a.querySelector("[data-new]").addEventListener("click", () => productModal(null, kind)),
   );
 
   if (!products.length) {
     view.innerHTML = emptyState(
-      "▤",
-      "No products yet. Create a product, then add its modules to start tracking units.",
+      K.icon,
+      K.empty,
       `<button class="btn primary" id="np">＋ New product</button>`,
     );
-    $("#np", view).addEventListener("click", () => productModal());
+    $("#np", view).addEventListener("click", () => productModal(null, kind));
     return;
   }
 
@@ -456,10 +500,10 @@ routes.products = async (view) => {
         <div style="min-width:0">
           <h2>${esc(p.name)}</h2>
           <div class="muted" style="font-size:12px;margin-top:2px">
-            ${p.description ? esc(p.description) + " · " : ""}${p.moduleCount} module${p.moduleCount === 1 ? "" : "s"} · ${p.inStock} in stock of ${p.totalUnits}</div>
+            ${p.description ? esc(p.description) + " · " : ""}${p.moduleCount} ${p.moduleCount === 1 ? K.item : K.items} · ${p.inStock} in stock of ${p.totalUnits}</div>
         </div>
         <div style="white-space:nowrap">
-          <button class="btn sm primary" data-new-module="${p.id}">＋ Module</button>
+          <button class="btn sm primary" data-new-module="${p.id}">＋ ${K.Item}</button>
           ${p.totalUnits ? `<button class="btn sm" data-product-units="${p.id}">Units</button>` : ""}
           <button class="btn sm ghost" data-edit-product="${p.id}">Edit</button>
         </div>
@@ -468,7 +512,7 @@ routes.products = async (view) => {
       ${
         mods.length
           ? `<table>
-        <thead><tr><th>Module</th><th>SKU</th><th>In stock</th><th>Total</th><th>Warranty</th><th></th></tr></thead>
+        <thead><tr><th>${K.Item}</th><th>SKU</th><th>In stock</th><th>Total</th><th>Warranty</th><th></th></tr></thead>
         <tbody>
           ${mods
             .map(
@@ -488,7 +532,7 @@ routes.products = async (view) => {
             )
             .join("")}
         </tbody></table>`
-          : `<div class="panel-b muted">No modules yet. Add one to start adding stock to this product.</div>`
+          : `<div class="panel-b muted">No ${K.items} yet. Add one to start adding stock to this product.</div>`
       }
       </div>
     </div>`;
@@ -505,18 +549,20 @@ routes.products = async (view) => {
   on("data-new-module", (id) => moduleModal(null, id));
   on("data-edit-module", (id) => moduleModal(modules.find((m) => m.id === id)));
   on("data-edit-product", (id) => productModal(products.find((p) => p.id === id)));
-};
+}
 
-function productModal(product) {
+/** Create a product of `kind`, or edit `product`. */
+function productModal(product, kind = product?.kind || "module") {
+  const K = KINDS[kind];
   const editing = !!product;
   openModal({
     title: editing ? "Edit product" : "New product",
     body: `
       <label class="field"><span class="lab">Product name</span>
-        <input id="p-name" maxlength="200" value="${esc(product?.name || "")}" placeholder="e.g. RFID Reader Kit"></label>
+        <input id="p-name" maxlength="200" value="${esc(product?.name || "")}" placeholder="${esc(K.productPh)}"></label>
       <label class="field"><span class="lab">Description <span class="muted">(optional)</span></span>
         <input id="p-desc" maxlength="2000" value="${esc(product?.description || "")}"></label>
-      ${editing ? "" : `<div class="hint">Next, add the modules that make up this product. Stock is added to each module.</div>`}
+      ${editing ? "" : `<div class="hint">Next, add the ${K.items} of this product. Stock is added to each ${K.item}.</div>`}
       <div class="hint" id="p-err" style="color:var(--err-ink)"></div>`,
     footer: `${editing && isAdmin() ? `<button class="btn danger" data-del style="margin-right:auto">Delete</button>` : ""}
              <button class="btn" data-cancel>Cancel</button>
@@ -529,6 +575,7 @@ function productModal(product) {
           name: $("#p-name", root).value.trim(),
           description: $("#p-desc", root).value.trim(),
         };
+        if (!editing) body.kind = kind;
         if (!body.name) {
           errEl.textContent = "Product name is required.";
           return;
@@ -567,13 +614,18 @@ function productModal(product) {
   });
 }
 
-/** Create a module in `productId` (no `mod`), or edit `mod` — which can move it to another product. */
+/**
+ * Create a module (or antenna) in `productId` (no `mod`), or edit `mod` —
+ * which can move it to another product of the same kind.
+ */
 function moduleModal(mod, productId) {
   const editing = !!mod;
-  const products = state.products || [];
   const currentProductId = mod?.productId || productId;
+  const kind = mod?.kind || (state.products || []).find((p) => p.id === currentProductId)?.kind || "module";
+  const K = KINDS[kind];
+  const products = (state.products || []).filter((p) => p.kind === kind);
   openModal({
-    title: editing ? "Edit module" : "New module",
+    title: editing ? `Edit ${K.item}` : `New ${K.item}`,
     body: `
       <label class="field"><span class="lab">Product</span>
         <select id="m-product">
@@ -584,16 +636,17 @@ function moduleModal(mod, productId) {
             )
             .join("")}
         </select></label>
-      <label class="field"><span class="lab">Module name</span>
-        <input id="m-name" maxlength="200" value="${esc(mod?.name || "")}" placeholder="e.g. VLD1030 module"></label>
+      <label class="field"><span class="lab">${K.Item} name</span>
+        <input id="m-name" maxlength="200" value="${esc(mod?.name || "")}" placeholder="${esc(K.itemPh)}"></label>
       <div class="row">
         <label class="field"><span class="lab">SKU</span>
-          <input id="m-sku" class="mono" maxlength="64" value="${esc(mod?.sku || "")}" placeholder="VLD1030"></label>
+          <input id="m-sku" class="mono" maxlength="64" value="${esc(mod?.sku || "")}" placeholder="${esc(K.skuPh)}"></label>
         <label class="field"><span class="lab">Warranty (months)</span>
           <input id="m-war" type="number" min="0" value="${mod?.warrantyMonths ?? state.settings?.defaultWarrantyMonths ?? 12}"></label>
       </div>
       <label class="field"><span class="lab">Serial prefix override <span class="muted">(optional)</span></span>
-        <input id="m-prefix" class="mono" value="${esc(mod?.serialPrefix || "")}" placeholder="leave blank to use global '${esc(state.settings?.serialPrefix || "")}'"></label>
+        <input id="m-prefix" class="mono" value="${esc(mod?.serialPrefix || "")}" placeholder="leave blank to use global '${esc(state.settings?.serialPrefix || "")}'">
+        ${editing && mod.totalUnits ? `<div class="hint">Changing it also renames the ${mod.totalUnits} existing unit${mod.totalUnits === 1 ? "" : "s"}' serials (numbers stay the same).</div>` : ""}</label>
       <label class="field"><span class="lab">Description <span class="muted">(optional)</span></span>
         <input id="m-desc" maxlength="2000" value="${esc(mod?.description || "")}"></label>
       <div class="hint" id="m-err" style="color:var(--err-ink)"></div>`,
@@ -614,16 +667,34 @@ function moduleModal(mod, productId) {
       $("[data-save]", root).addEventListener("click", async () => {
         const body = payload();
         if (!body.name || !body.sku) {
-          errEl.textContent = "Module name and SKU are required.";
+          errEl.textContent = `${K.Item} name and SKU are required.`;
           return;
+        }
+        if (editing && mod.totalUnits) {
+          // The server renames existing generated serials to the new prefix.
+          const global = state.settings?.serialPrefix || "";
+          const oldPrefix = mod.serialPrefix ?? global;
+          const newPrefix = (body.serialPrefix ?? global).toUpperCase();
+          const code = productCode(mod.sku, mod.name);
+          if (
+            oldPrefix !== newPrefix &&
+            !confirm(
+              `Change the serial prefix? The ${mod.totalUnits} existing unit${mod.totalUnits === 1 ? "" : "s"} will be renamed too, ` +
+                `e.g. ${formatSerial(oldPrefix, code, 1)} → ${formatSerial(newPrefix, code, 1)}.
+
+` +
+                "Warranty cards already printed will still show the old serials.",
+            )
+          )
+            return;
         }
         try {
           if (editing) {
             await api("/modules/" + mod.id, { method: "PATCH", body: JSON.stringify(body) });
-            toast("Module updated", "ok");
+            toast(`${K.Item} updated`, "ok");
           } else {
             await api("/modules", { method: "POST", body: JSON.stringify(body) });
-            toast("Module created", "ok");
+            toast(`${K.Item} created`, "ok");
           }
           close();
           stockChanged();
@@ -635,10 +706,10 @@ function moduleModal(mod, productId) {
       const del = $("[data-del]", root);
       if (del)
         del.addEventListener("click", async () => {
-          if (!confirm(`Delete module "${mod.name}" and ALL its units? This cannot be undone.`)) return;
+          if (!confirm(`Delete ${K.item} "${mod.name}" and ALL its units? This cannot be undone.`)) return;
           try {
             await api("/modules/" + mod.id, { method: "DELETE" });
-            toast("Module deleted", "ok");
+            toast(`${K.Item} deleted`, "ok");
             close();
             stockChanged();
             render();
@@ -663,7 +734,7 @@ routes.intake = async (view, params) => {
   if (!modules.length) {
     view.innerHTML = emptyState(
       "＋",
-      "You need a product with at least one module first. Create them on the Products page.",
+      "You need a product with at least one module (or antenna) first. Create them on the Products or Antennas page.",
       `<button class="btn primary" id="gp">Go to Products</button>`,
     );
     $("#gp", view).addEventListener("click", () => go("products"));
@@ -889,34 +960,57 @@ routes.intake = async (view, params) => {
 };
 
 // ----------------------------------------------------------------------- tags
-// Tags are stocked by quantity only: no serials, no warranty.
+// Tags and the other quantity-only things given to customers (RS232 cables…),
+// each in a category admins set up in Settings. No serials, no warranty.
+let tagCategoryFilter = "";
 routes.tags = async (view) => {
-  const tags = await loadTags(true);
+  const [tags, categories] = await Promise.all([loadTags(true), loadTagCategories(true)]);
+  if (!categories.some((c) => c.id === tagCategoryFilter)) tagCategoryFilter = "";
+  const newItem = () => qtyItemModal(TAG_KIND, null, tagCategoryFilter);
   const inStock = tags.reduce((n, t) => n + t.inStock, 0);
   setHeader(
-    "Tags",
-    `${tags.length} tag${tags.length === 1 ? "" : "s"} · ${inStock} in stock`,
-    `<button class="btn primary" data-new>＋ New tag</button>`,
-    (a) => a.querySelector("[data-new]").addEventListener("click", () => qtyItemModal(TAG_KIND)),
+    "Tags & accessories",
+    `${tags.length} item${tags.length === 1 ? "" : "s"} · ${inStock} in stock`,
+    categories.length ? `<button class="btn primary" data-new>＋ New item</button>` : "",
+    (a) => a.querySelector("[data-new]")?.addEventListener("click", newItem),
   );
+
+  if (!categories.length) {
+    view.innerHTML = emptyState(
+      "◈",
+      "No categories yet. An admin adds them (Tag, RS232 Cable…) in Settings.",
+      isAdmin() ? `<button class="btn primary" id="nc">Go to Settings</button>` : "",
+    );
+    if (isAdmin()) $("#nc", view).addEventListener("click", () => go("settings"));
+    return;
+  }
 
   if (!tags.length) {
     view.innerHTML = emptyState(
       "◈",
-      "No tags yet. Create a tag, then add its stock by quantity.",
-      `<button class="btn primary" id="nt">＋ New tag</button>`,
+      "Nothing here yet. Create an item (a tag, an RS232 cable…), then add its stock by quantity.",
+      `<button class="btn primary" id="nt">＋ New item</button>`,
     );
-    $("#nt", view).addEventListener("click", () => qtyItemModal(TAG_KIND));
+    $("#nt", view).addEventListener("click", newItem);
     return;
   }
 
   view.innerHTML = `
     <div class="toolbar">
       <div class="grow search"><span class="ic">⌕</span>
-        <input id="t-q" placeholder="Search tags…"></div>
+        <input id="t-q" placeholder="Search…"></div>
+      <select id="t-cat" style="width:auto">
+        <option value="">All categories</option>
+        ${categories
+          .map(
+            (c) =>
+              `<option value="${c.id}" ${c.id === tagCategoryFilter ? "selected" : ""}>${esc(c.name)} (${c.tagCount})</option>`,
+          )
+          .join("")}
+      </select>
     </div>
     <div class="panel"><div class="panel-b flush"><table>
-      <thead><tr><th>Tag</th><th>In stock</th><th>Added</th><th>Given</th><th></th></tr></thead>
+      <thead><tr><th>Item</th><th>Category</th><th>In stock</th><th>Added</th><th>Given</th><th></th></tr></thead>
       <tbody id="t-rows"></tbody>
     </table></div></div>`;
 
@@ -925,9 +1019,10 @@ routes.tags = async (view) => {
     const needle = $("#t-q", view).value.trim().toLowerCase();
     const shown = tags.filter(
       (t) =>
-        !needle ||
-        t.name.toLowerCase().includes(needle) ||
-        t.description.toLowerCase().includes(needle),
+        (!tagCategoryFilter || t.categoryId === tagCategoryFilter) &&
+        (!needle ||
+          t.name.toLowerCase().includes(needle) ||
+          t.description.toLowerCase().includes(needle)),
     );
     rows.innerHTML = shown.length
       ? shown
@@ -935,6 +1030,7 @@ routes.tags = async (view) => {
             (t) => `
         <tr>
           <td><b>${esc(t.name)}</b>${t.description ? `<div class="muted" style="font-size:12px">${esc(t.description)}</div>` : ""}</td>
+          <td><span class="chip tag">${esc(t.categoryName)}</span></td>
           <td><b>${t.inStock}</b></td>
           <td class="muted">${t.totalAdded}</td>
           <td class="muted">${t.totalGiven}</td>
@@ -947,10 +1043,14 @@ routes.tags = async (view) => {
         </tr>`,
           )
           .join("")
-      : `<tr><td colspan="5" class="muted">No tag matches that search.</td></tr>`;
+      : `<tr><td colspan="6" class="muted">Nothing matches that search${tagCategoryFilter ? " in this category" : ""}.</td></tr>`;
   };
   renderRows();
   $("#t-q", view).addEventListener("input", renderRows);
+  $("#t-cat", view).addEventListener("change", (e) => {
+    tagCategoryFilter = e.target.value;
+    renderRows();
+  });
   rows.addEventListener("click", (e) => {
     const b = e.target.closest("button");
     if (!b) return;
@@ -968,11 +1068,13 @@ routes.tags = async (view) => {
  */
 const TAG_KIND = {
   api: "/tags",
-  noun: "tag",
-  Noun: "Tag",
+  noun: "item",
+  Noun: "Item",
   namePh: "e.g. VST-JTL03",
   descPh: "e.g. Jewellery tag (100×14 mm)",
-  hint: "Tags are counted by quantity only — no serials or warranty.",
+  hint: "Counted by quantity only — no serials or warranty.",
+  /** Each item is in one of these (loaded by the tags page). */
+  categories: () => state.tagCategories || [],
   /** Where the tag went: one row per hand-over. */
   usageHtml: (t) => `
       <div class="item-h"><b>Given out</b><span class="muted">${t.given.length} record${t.given.length === 1 ? "" : "s"}</span></div>
@@ -1029,12 +1131,28 @@ const RESOURCE_KIND = {
   totals: (r) => [["Total used", r.totalUsed]],
 };
 
-/** Create an item of `kind` (optionally with opening stock), or edit `item`'s name / description. */
-function qtyItemModal(kind, item) {
+/**
+ * Create an item of `kind` (optionally with opening stock), or edit `item`'s
+ * name / description. Kinds with categories also pick one (`categoryId` first).
+ */
+function qtyItemModal(kind, item, categoryId) {
   const editing = !!item;
+  const categories = kind.categories ? kind.categories() : null;
+  const selectedCat = item?.categoryId || categoryId;
   openModal({
     title: editing ? `Edit ${kind.noun}` : `New ${kind.noun}`,
     body: `
+      ${
+        categories
+          ? `<label class="field"><span class="lab">Category</span>
+               <select id="t-cat">
+                 ${selectedCat ? "" : `<option value="">Choose a category…</option>`}
+                 ${categories
+                   .map((c) => `<option value="${c.id}" ${c.id === selectedCat ? "selected" : ""}>${esc(c.name)}</option>`)
+                   .join("")}
+               </select></label>`
+          : ""
+      }
       <label class="field"><span class="lab">${kind.Noun} name</span>
         <input id="t-name" maxlength="200" value="${esc(item?.name || "")}" placeholder="${esc(kind.namePh)}"></label>
       <label class="field"><span class="lab">Description <span class="muted">(optional)</span></span>
@@ -1059,6 +1177,13 @@ function qtyItemModal(kind, item) {
           name: $("#t-name", root).value.trim(),
           description: $("#t-desc", root).value.trim(),
         };
+        if (categories) {
+          body.categoryId = $("#t-cat", root).value;
+          if (!body.categoryId) {
+            errEl.textContent = "Choose a category.";
+            return;
+          }
+        }
         if (!body.name) {
           errEl.textContent = `${kind.Noun} name is required.`;
           return;
@@ -1169,7 +1294,7 @@ async function qtyDetailModal(kind, id) {
     return toast(e.message, "err");
   }
   openModal({
-    title: `${kind.Noun} ${t.name}`,
+    title: `${t.categoryName || kind.Noun} ${t.name}`,
     wide: true,
     body: `
       ${t.description ? `<div class="muted" style="margin-bottom:12px">${esc(t.description)}</div>` : ""}
@@ -1394,11 +1519,14 @@ function addMonths(dateStr, months) {
 
 routes.give = async (view, params) => {
   const [modules, tags] = await Promise.all([loadModules(true), loadTags(true)]);
-  setHeader("Give stock", "Hand units and tags to a customer against an invoice", "");
+  setHeader("Give stock", "Hand modules, antennas, tags and accessories to a customer against an invoice", "");
 
-  const available = modules.filter((m) => m.inStock > 0);
+  const inStock = modules.filter((m) => m.inStock > 0);
+  // Antennas go on the same hand-over as modules, in their own section.
+  const available = inStock.filter((m) => m.kind === "module");
+  const availableAntennas = inStock.filter((m) => m.kind === "antenna");
   const availableTags = tags.filter((t) => t.inStock > 0);
-  if (!available.length && !availableTags.length) {
+  if (!inStock.length && !availableTags.length) {
     view.innerHTML = emptyState(
       "－",
       "Nothing is in stock right now. Add stock first.",
@@ -1445,22 +1573,35 @@ routes.give = async (view, params) => {
         <div class="give-lines" id="g-lines"></div>
         ${
           available.length
-            ? `<div class="muted" id="g-none" style="margin-bottom:12px" hidden>No products added. Add one, or give only tags below.</div>
+            ? `<div class="muted" id="g-none" style="margin-bottom:12px" hidden>No products added. Add one, or give only antennas, tags &amp; accessories below.</div>
                <button class="btn" id="g-add">＋ Add product</button>`
-            : `<div class="muted">No modules are in stock. You can still give tags below.</div>`
+            : `<div class="muted">No modules are in stock. You can still give antennas, tags &amp; accessories below.</div>`
         }
       </div>
     </div>
 
-    <div class="panel"><div class="panel-h"><h2>Tags</h2>
+    <div class="panel"><div class="panel-h"><h2>Antennas</h2>
+      <span class="muted" id="g-ant-summary" style="font-size:12.5px"></span></div>
+      <div class="panel-b">
+        <div class="give-lines" id="g-ant-lines"></div>
+        ${
+          availableAntennas.length
+            ? `<button class="btn" id="g-add-ant">＋ Add antenna</button>
+               <div class="hint">Optional. Given like modules: pick serials or a quantity; the warranty applies to them too.</div>`
+            : `<div class="muted">No antennas are in stock.</div>`
+        }
+      </div>
+    </div>
+
+    <div class="panel"><div class="panel-h"><h2>Tags &amp; accessories</h2>
       <span class="muted" id="g-tag-summary" style="font-size:12.5px"></span></div>
       <div class="panel-b">
         <div class="give-lines" id="g-tags"></div>
         ${
           availableTags.length
-            ? `<button class="btn" id="g-add-tag">＋ Add tag</button>
-               <div class="hint">Optional. Tags have no serials or warranty, just a quantity.</div>`
-            : `<div class="muted">No tags are in stock.</div>`
+            ? `<button class="btn" id="g-add-tag">＋ Add item</button>
+               <div class="hint">Optional. Pick a category (Tag, RS232 Cable…), then the item. No serials or warranty, just a quantity.</div>`
+            : `<div class="muted">No tags or accessories are in stock.</div>`
         }
       </div>
     </div>
@@ -1476,6 +1617,7 @@ routes.give = async (view, params) => {
   const tagLines = [];
   let lineSeq = 0;
   const linesEl = $("#g-lines", view);
+  const antLinesEl = $("#g-ant-lines", view);
   const tagsEl = $("#g-tags", view);
 
   function syncValidity() {
@@ -1490,15 +1632,18 @@ routes.give = async (view, params) => {
   }
 
   function syncSummary() {
-    const units = lines.reduce((n, l) => n + l.count(), 0);
-    $("#g-summary", view).textContent = lines.length
-      ? `${lines.length} product${lines.length === 1 ? "" : "s"} · ${units} unit${units === 1 ? "" : "s"}`
-      : "";
+    const summary = (kind, noun) => {
+      const ls = lines.filter((l) => l.module().kind === kind);
+      const units = ls.reduce((n, l) => n + l.count(), 0);
+      return ls.length ? `${ls.length} ${noun}${ls.length === 1 ? "" : "s"} · ${units} unit${units === 1 ? "" : "s"}` : "";
+    };
+    $("#g-summary", view).textContent = summary("module", "product");
+    $("#g-ant-summary", view).textContent = summary("antenna", "antenna");
     const none = $("#g-none", view);
-    if (none) none.hidden = lines.length > 0;
+    if (none) none.hidden = lines.some((l) => l.module().kind === "module");
     const qty = tagLines.reduce((n, l) => n + l.count(), 0);
     $("#g-tag-summary", view).textContent = tagLines.length
-      ? `${qty} tag${qty === 1 ? "" : "s"}`
+      ? `${tagLines.length} line${tagLines.length === 1 ? "" : "s"} · ${qty} item${qty === 1 ? "" : "s"}`
       : "";
   }
 
@@ -1507,17 +1652,18 @@ routes.give = async (view, params) => {
     syncSummary();
   };
 
-  function addLine(moduleId) {
-    // Default a new line to a module no other line is using yet.
+  function addLine(moduleId, kind = "module") {
+    const choices = kind === "antenna" ? availableAntennas : available;
+    // Default a new line to a module (or antenna) no other line is using yet.
     const used = new Set(lines.map((l) => l.module().id));
-    const start = moduleId || (available.find((m) => !used.has(m.id)) || available[0]).id;
-    const line = giveLine(++lineSeq, available, start, changed, () => {
+    const start = moduleId || (choices.find((m) => !used.has(m.id)) || choices[0]).id;
+    const line = giveLine(++lineSeq, choices, start, changed, () => {
       lines.splice(lines.indexOf(line), 1);
       line.el.remove();
       changed();
     });
     lines.push(line);
-    linesEl.appendChild(line.el);
+    (kind === "antenna" ? antLinesEl : linesEl).appendChild(line.el);
     changed();
   }
 
@@ -1535,6 +1681,7 @@ routes.give = async (view, params) => {
   }
 
   if (available.length) $("#g-add", view).addEventListener("click", () => addLine());
+  if (availableAntennas.length) $("#g-add-ant", view).addEventListener("click", () => addLine(null, "antenna"));
   if (availableTags.length) $("#g-add-tag", view).addEventListener("click", () => addTagLine());
   $("#g-date", view).addEventListener("input", syncValidity);
   $("#g-valid", view).addEventListener("input", (e) => {
@@ -1542,10 +1689,13 @@ routes.give = async (view, params) => {
     syncValidity();
   });
 
-  // Arriving from a tag's page starts with that tag; otherwise with a product.
+  // Arriving from a tag's or module's page starts with it; otherwise with a product.
   const startTag = params.tagId && availableTags.find((t) => t.id === params.tagId);
+  const startModule = params.moduleId && inStock.find((m) => m.id === params.moduleId);
   if (startTag) addTagLine(startTag.id);
-  else if (available.length) addLine(params.moduleId);
+  else if (startModule) addLine(startModule.id, startModule.kind);
+  else if (available.length) addLine();
+  else if (availableAntennas.length) addLine(null, "antenna");
   else addTagLine();
 
   $("#g-submit", view).addEventListener("click", async () => {
@@ -1570,27 +1720,27 @@ routes.give = async (view, params) => {
     if (!body.customerPhone) return fail("Enter the customer phone.");
     if (!body.invoiceNo) return fail("Enter the invoice number.");
     if (!body.givenDate) return fail("Enter the given date.");
-    if (!lines.length && !tagLines.length) return fail("Add a product or a tag to give.");
+    if (!lines.length && !tagLines.length) return fail("Add a product, antenna, tag or accessory to give.");
     const seen = new Set();
-    for (const [i, line] of lines.entries()) {
+    for (const line of lines) {
       const m = line.module();
       if (seen.has(m.id)) {
         return fail(`${m.productName} · ${m.name} is added twice. Remove one line, or give all of it on one line.`);
       }
       seen.add(m.id);
       const item = line.item();
-      if (typeof item === "string") return fail(`Product ${i + 1} (${m.name}): ${item}`);
+      if (typeof item === "string") return fail(`${m.productName} · ${m.name}: ${item}`);
       body.items.push(item);
     }
     const seenTags = new Set();
     for (const line of tagLines) {
       const t = line.tag();
       if (seenTags.has(t.id)) {
-        return fail(`Tag ${t.name} is added twice. Remove one line, or give all of it on one line.`);
+        return fail(`${t.categoryName} ${t.name} is added twice. Remove one line, or give all of it on one line.`);
       }
       seenTags.add(t.id);
       const item = line.item();
-      if (typeof item === "string") return fail(`Tag ${t.name}: ${item}`);
+      if (typeof item === "string") return fail(`${t.categoryName} ${t.name}: ${item}`);
       body.tags.push(item);
     }
 
@@ -1610,7 +1760,18 @@ routes.give = async (view, params) => {
   });
 };
 
-/** "3 units of 2 products and 500 tags" — what a hand-over gave. */
+/** A hand-over's tag lines totalled per category: [{ id, name, quantity }], in line order. */
+function tagTotals(d) {
+  const byCat = new Map();
+  for (const t of d.tags) {
+    const g = byCat.get(t.categoryId) || { id: t.categoryId, name: t.categoryName, quantity: 0 };
+    g.quantity += t.quantity;
+    byCat.set(t.categoryId, g);
+  }
+  return [...byCat.values()];
+}
+
+/** "3 units of 2 products and 500 × Tag" — what a hand-over gave. */
 function dispatchSummary(d) {
   const parts = [];
   if (d.items.length) {
@@ -1619,48 +1780,69 @@ function dispatchSummary(d) {
         (d.items.length > 1 ? ` of ${d.items.length} products` : ""),
     );
   }
-  if (d.tags.length) parts.push(`${d.tagQuantity} tag${d.tagQuantity === 1 ? "" : "s"}`);
+  for (const g of tagTotals(d)) parts.push(`${g.quantity} × ${g.name}`);
   return parts.join(" and ");
 }
 
 /**
- * One tag line on the Give stock page: a tag and a quantity. `item()` returns
- * the API tag line, or an error message string.
+ * One tag line on the Give stock page: a category, an item of it, and a
+ * quantity. `available` is sorted by category then name. `item()` returns the
+ * API tag line, or an error message string.
  */
 function tagLine(available, tagId, onChange, onRemove) {
+  const categories = [];
+  for (const t of available) {
+    if (!categories.some((c) => c.id === t.categoryId)) categories.push({ id: t.categoryId, name: t.categoryName });
+  }
+  const startCat = available.find((t) => t.id === tagId).categoryId;
   const el = document.createElement("div");
   el.className = "give-line";
   el.innerHTML = `
-    <div class="give-line-h"><b class="n">Tag</b>
+    <div class="give-line-h"><b class="n">Item</b>
       <button type="button" class="btn sm ghost" data-remove>✕ Remove</button></div>
-    <div class="row">
-      <label class="field"><span class="lab">Tag</span>
-        <select data-tag>
-          ${available
-            .map(
-              (t) =>
-                `<option value="${t.id}" ${t.id === tagId ? "selected" : ""}>${esc(t.name)} (${t.inStock} in stock)</option>`,
-            )
+    <div class="row three">
+      <label class="field"><span class="lab">Category</span>
+        <select data-cat>
+          ${categories
+            .map((c) => `<option value="${c.id}" ${c.id === startCat ? "selected" : ""}>${esc(c.name)}</option>`)
             .join("")}
         </select></label>
+      <label class="field"><span class="lab">Item</span>
+        <select data-tag></select></label>
       <label class="field"><span class="lab">Quantity</span>
         <input data-qty type="number" min="1" value="1">
         <div class="hint" data-hint></div></label>
     </div>`;
 
+  const catSel = $("[data-cat]", el);
   const sel = $("[data-tag]", el);
   const qtyInput = $("[data-qty]", el);
   const tag = () => available.find((t) => t.id === sel.value);
+  const fillItems = (selectedId) => {
+    sel.innerHTML = available
+      .filter((t) => t.categoryId === catSel.value)
+      .map(
+        (t) =>
+          `<option value="${t.id}" ${t.id === selectedId ? "selected" : ""}>${esc(t.name)} (${t.inStock} in stock)</option>`,
+      )
+      .join("");
+  };
   const syncHint = () => {
     qtyInput.max = tag().inStock;
     $("[data-hint]", el).textContent = `${tag().inStock} in stock.`;
   };
+  catSel.addEventListener("change", () => {
+    fillItems();
+    syncHint();
+    onChange();
+  });
   sel.addEventListener("change", () => {
     syncHint();
     onChange();
   });
   qtyInput.addEventListener("input", onChange);
   $("[data-remove]", el).addEventListener("click", onRemove);
+  fillItems(tagId);
   syncHint();
 
   return {
@@ -1687,7 +1869,7 @@ function giveLine(n, available, moduleId, onChange, onRemove) {
   const el = document.createElement("div");
   el.className = "give-line";
   el.innerHTML = `
-    <div class="give-line-h"><b class="n">Product</b>
+    <div class="give-line-h"><b class="n">${available[0].kind === "antenna" ? "Antenna" : "Product"}</b>
       <button type="button" class="btn sm ghost" data-remove>✕ Remove</button></div>
     ${modulePickerHtml(prefix)}
     <div class="field">
@@ -1841,7 +2023,7 @@ routes.dispatches = async (view, params) => {
   view.innerHTML = `
     <div class="toolbar">
       <div class="grow search"><span class="ic">⌕</span>
-        <input id="d-q" placeholder="Search invoice, customer, phone, GST no, product, module, tag, serial…" value="${esc(q)}"></div>
+        <input id="d-q" placeholder="Search invoice, customer, phone, GST no, product, module, tag, accessory, serial…" value="${esc(q)}"></div>
       ${stockFilterHtml("d", products, modules, productId, moduleId)}
     </div>
 
@@ -1849,7 +2031,7 @@ routes.dispatches = async (view, params) => {
     ${
       data.items.length
         ? `<table>
-        <thead><tr><th>Given</th><th>Invoice</th><th>Customer</th><th>GST no</th><th>Products / tags</th><th>Qty</th><th>Valid until</th><th></th></tr></thead>
+        <thead><tr><th>Given</th><th>Invoice</th><th>Customer</th><th>GST no</th><th>Products / items</th><th>Qty</th><th>Valid until</th><th></th></tr></thead>
         <tbody>
           ${data.items
             .map(
@@ -1862,12 +2044,12 @@ routes.dispatches = async (view, params) => {
               <td>${d.items
                 .map((i) => `<div class="item-line">${moduleCell(i)}${d.items.length > 1 ? `<span class="muted">× ${i.quantity}</span>` : ""}</div>`)
                 .join("")}${d.tags
-                .map((t) => `<div class="item-line"><span class="chip tag">${esc(t.tagName)}</span><span class="muted">× ${t.quantity}</span></div>`)
+                .map((t) => `<div class="item-line"><span class="chip tag">${esc(t.tagName)}</span><span class="muted">${esc(t.categoryName)} × ${t.quantity}</span></div>`)
                 .join("")}</td>
               <td>${d.items.length ? `<b>${d.quantity}</b>` : ""}${
-                d.tags.length
-                  ? `<div class="muted" style="font-size:12px;white-space:nowrap">${d.tagQuantity} tag${d.tagQuantity === 1 ? "" : "s"}</div>`
-                  : ""
+                tagTotals(d)
+                  .map((g) => `<div class="muted" style="font-size:12px;white-space:nowrap">${g.quantity} × ${esc(g.name)}</div>`)
+                  .join("")
               }</td>
               <td class="mono" style="font-size:12.5px;white-space:nowrap">${d.validUntil ? esc(d.validUntil) : `<span class="muted">—</span>`}</td>
               <td style="text-align:right;white-space:nowrap">
@@ -1951,8 +2133,20 @@ async function dispatchModal(id) {
       ${d.items
         .map((i) => {
           const units = d.units.filter((u) => u.moduleId === i.moduleId);
+          const resources = d.resources.filter((r) => r.moduleId === i.moduleId);
           return `
       <div class="item-h">${moduleCell(i)}<span class="muted">${i.quantity} unit${i.quantity === 1 ? "" : "s"}</span></div>
+      ${
+        resources.length
+          ? `<div class="item-line" style="flex-wrap:wrap;gap:6px;margin-bottom:8px">
+              <span class="muted" style="font-size:12px">Resources used:</span>
+              ${resources
+                .map(
+                  (r) => `<span class="chip tag" title="${r.units} unit${r.units === 1 ? "" : "s"}">${esc(r.resourceName)} × ${r.quantity}</span>`,
+                )
+                .join("")}</div>`
+          : ""
+      }
       <div class="pick-list" style="margin-bottom:12px">
         ${
           units.length
@@ -1968,20 +2162,21 @@ async function dispatchModal(id) {
       </div>`;
         })
         .join("")}
-      ${
-        d.tags.length
-          ? `<div class="item-h"><b>Tags</b><span class="muted">${d.tagQuantity} tag${d.tagQuantity === 1 ? "" : "s"}</span></div>
+      ${tagTotals(d)
+        .map(
+          (g) => `<div class="item-h"><b>${esc(g.name)}</b><span class="muted">${g.quantity} in total</span></div>
       <div class="pick-list" style="margin-bottom:12px">
         ${d.tags
+          .filter((t) => t.categoryId === g.id)
           .map(
             (t) => `<div class="pick-row" style="cursor:default">
               <span class="chip tag">${esc(t.tagName)}</span>
               <span class="d mono">× ${t.quantity}</span></div>`,
           )
           .join("")}
-      </div>`
-          : ""
-      }
+      </div>`,
+        )
+        .join("")}
       ${d.notes ? `<div class="hint" style="margin-top:12px">Notes: ${esc(d.notes)}</div>` : ""}
       <div class="hint" style="margin-top:8px">Entered${d.createdByName ? " by " + esc(d.createdByName) : ""} on ${esc(new Date(d.createdAt).toLocaleString())}</div>`,
     footer: `
@@ -1997,7 +2192,7 @@ async function dispatchModal(id) {
       if (del)
         del.addEventListener("click", async () => {
           const lineCount = d.items.length + d.tags.length;
-          const what = [d.items.length ? "sold units" : "", d.tags.length ? "tags" : ""].filter(Boolean).join(" and ");
+          const what = [d.items.length ? "sold units" : "", d.tags.length ? "tags & accessories" : ""].filter(Boolean).join(" and ");
           if (!confirm(`Delete this record${lineCount > 1 ? ` (all ${lineCount} lines)` : ""} and put its ${what} back in stock?`)) return;
           try {
             await api("/dispatches/" + d.id, { method: "DELETE" });
@@ -2295,7 +2490,7 @@ function unitModal(u, onSaved) {
       </div>
       <div class="cert-grid" style="border-radius:10px;border:1px solid var(--line);margin-bottom:16px">
         <div class="c"><div class="k">Product</div><div class="v">${esc(u.productName)}</div></div>
-        <div class="c"><div class="k">Module</div><div class="v">${esc(u.moduleName)}</div></div>
+        <div class="c"><div class="k">${KINDS[u.kind].Item}</div><div class="v">${esc(u.moduleName)}</div></div>
         <div class="c"><div class="k">SKU</div><div class="v mono">${esc(u.sku)}</div></div>
         <div class="c"><div class="k">Status</div><div class="v">${statusChip(u.status)}</div></div>
         <div class="c"><div class="k">Intake date</div><div class="v mono">${esc(u.intakeDate)}</div></div>
@@ -2469,8 +2664,8 @@ routes.warranty = async (view, params) => {
 
 // ------------------------------------------------------------------- settings
 routes.settings = async (view) => {
-  const s = await loadSettings(true);
-  setHeader("Settings", "Company, serial format, and defaults", "");
+  const [s, categories] = await Promise.all([loadSettings(true), loadTagCategories(true)]);
+  setHeader("Settings", "Company, serial format, categories, and defaults", "");
 
   const sampleSeq = formatSerial(s.serialPrefix, "VLD1030", 1);
   view.innerHTML = `
@@ -2489,6 +2684,36 @@ routes.settings = async (view) => {
         <div class="hint">Internal serials will look like <b class="mono" id="s-sample">${esc(sampleSeq)}</b></div>
         <div class="hint" id="s-err"></div>
         <div style="margin-top:14px"><button class="btn primary" id="s-save">Save settings</button></div>
+      </div>
+    </div>
+
+    <div class="panel"><div class="panel-h"><h2>Tag &amp; accessory categories</h2></div>
+      <div class="panel-b">
+        <p class="muted" style="margin-top:0">The kinds of quantity-only items on the Tags page and in Give stock — e.g. Tag, RS232 Cable, Adapter. Each is an option in the category dropdown.</p>
+        ${
+          categories.length
+            ? `<div class="panel" style="margin-bottom:14px"><div class="panel-b flush"><table>
+            <thead><tr><th>Category</th><th>Items</th><th></th></tr></thead><tbody>
+            ${categories
+              .map(
+                (c) => `<tr>
+                <td><b>${esc(c.name)}</b></td>
+                <td class="muted">${c.tagCount}</td>
+                <td style="text-align:right;white-space:nowrap">
+                  <button class="btn sm" data-cat-rename="${c.id}">Rename</button>
+                  <button class="btn sm ghost" data-cat-del="${c.id}">Delete</button></td>
+              </tr>`,
+              )
+              .join("")}
+            </tbody></table></div></div>`
+            : `<p class="muted">No categories yet. Add one to start using the Tags page.</p>`
+        }
+        <div class="row">
+          <label class="field"><span class="lab">New category</span>
+            <input id="s-cat-name" maxlength="100" placeholder="e.g. RS232 Cable"></label>
+        </div>
+        <button class="btn" id="s-cat-add">＋ Add category</button>
+        <div class="hint" id="s-cat-err" style="color:var(--err-ink)"></div>
       </div>
     </div>
 
@@ -2529,6 +2754,56 @@ routes.settings = async (view) => {
       $("#s-err", view).textContent = e.message;
     }
   });
+
+  const catErr = (m) => ($("#s-cat-err", view).textContent = m);
+  const categoriesChanged = () => {
+    stockChanged();
+    render();
+  };
+  $("#s-cat-add", view).addEventListener("click", async (e) => {
+    catErr("");
+    const name = $("#s-cat-name", view).value.trim();
+    if (!name) return catErr("Enter a category name.");
+    e.target.disabled = true;
+    try {
+      await api("/tag-categories", { method: "POST", body: JSON.stringify({ name }) });
+      toast(`Category ${name} added`, "ok");
+      categoriesChanged();
+    } catch (ex) {
+      catErr(validationMessage(ex));
+      e.target.disabled = false;
+    }
+  });
+  $("#s-cat-name", view).addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("#s-cat-add", view).click();
+  });
+  view.querySelectorAll("[data-cat-rename]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const c = categories.find((x) => x.id === b.dataset.catRename);
+      const name = prompt(`Rename category "${c.name}" to:`, c.name)?.trim();
+      if (!name || name === c.name) return;
+      try {
+        await api("/tag-categories/" + c.id, { method: "PATCH", body: JSON.stringify({ name }) });
+        toast("Category renamed", "ok");
+        categoriesChanged();
+      } catch (ex) {
+        catErr(validationMessage(ex));
+      }
+    }),
+  );
+  view.querySelectorAll("[data-cat-del]").forEach((b) =>
+    b.addEventListener("click", async () => {
+      const c = categories.find((x) => x.id === b.dataset.catDel);
+      if (!confirm(`Delete category "${c.name}"?`)) return;
+      try {
+        await api("/tag-categories/" + c.id, { method: "DELETE" });
+        toast("Category deleted", "ok");
+        categoriesChanged();
+      } catch (ex) {
+        catErr(ex.message);
+      }
+    }),
+  );
 
   $("#s-sample-btn", view).addEventListener("click", async (e) => {
     e.target.disabled = true;
@@ -2844,14 +3119,31 @@ $("#pwBtn").addEventListener("click", () => changePasswordModal());
 document.querySelectorAll("#nav a").forEach((a) =>
   a.addEventListener("click", () => go(a.dataset.route)),
 );
+// The menu button: a drawer on tablets/phones; on wider screens it hides or
+// shows the sidebar, remembered per browser.
+const SIDEBAR_KEY = "stockroom.sidebarCollapsed";
+const drawerMode = window.matchMedia("(max-width:1024px)");
+function setDrawer(open) {
+  $("#sidebar").classList.toggle("open", open);
+  $("#scrim").classList.toggle("on", open);
+  $("#menuBtn").setAttribute("aria-expanded", String(open));
+}
+function setCollapsed(collapsed) {
+  $("#app").classList.toggle("collapsed", collapsed);
+  $("#menuBtn").setAttribute("aria-expanded", String(!collapsed));
+  try { localStorage.setItem(SIDEBAR_KEY, collapsed ? "1" : "0"); } catch { /* storage blocked */ }
+}
+try { $("#app").classList.toggle("collapsed", localStorage.getItem(SIDEBAR_KEY) === "1"); } catch { /* storage blocked */ }
 $("#menuBtn").addEventListener("click", () => {
-  $("#sidebar").classList.toggle("open");
-  $("#scrim").classList.toggle("on");
+  if (drawerMode.matches) setDrawer(!$("#sidebar").classList.contains("open"));
+  else setCollapsed(!$("#app").classList.contains("collapsed"));
 });
-$("#scrim").addEventListener("click", () => {
-  $("#sidebar").classList.remove("open");
-  $("#scrim").classList.remove("on");
+$("#scrim").addEventListener("click", () => setDrawer(false));
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("#sidebar").classList.contains("open")) setDrawer(false);
 });
+// Leaving drawer mode (e.g. rotating a tablet) mustn't leave the scrim up.
+drawerMode.addEventListener("change", () => setDrawer(false));
 window.addEventListener("hashchange", render);
 
 (async function init() {

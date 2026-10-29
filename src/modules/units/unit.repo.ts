@@ -26,6 +26,7 @@ type UnitViewRow = UnitRow & {
   module_sku: string;
   product_id: string;
   product_name: string;
+  product_kind: UnitView["kind"];
 };
 
 function mapUnit(row: UnitRow): Unit {
@@ -55,6 +56,7 @@ function mapUnitView(row: UnitViewRow): UnitView {
     sku: row.module_sku,
     productId: row.product_id,
     productName: row.product_name,
+    kind: row.product_kind,
   };
 }
 
@@ -66,7 +68,7 @@ const VIEW_FROM = `
 
 const VIEW_SELECT = `
   SELECT u.*, m.name AS module_name, m.sku AS module_sku,
-         p.id AS product_id, p.name AS product_name
+         p.id AS product_id, p.name AS product_name, p.kind AS product_kind
   ${VIEW_FROM}`;
 
 export interface InsertableUnit {
@@ -177,6 +179,30 @@ export async function maxSerialNumber(
     [from, moduleId, pattern, from],
   );
   return Number(rows[0]?.["n"] ?? 0);
+}
+
+/**
+ * Swap the base of a module's generated serials, keeping their numbers:
+ * `OLD-00007` -> `NEW-00007`. Serials not of the `${oldBase}-NNNNN` shape
+ * (typed by hand) are left alone. Fails with a duplicate-key error, changing
+ * nothing, if a renamed serial is already taken. Returns how many changed.
+ */
+export async function renameSerialBase(
+  conn: Queryable,
+  moduleId: string,
+  oldBase: string,
+  newBase: string,
+): Promise<number> {
+  const pattern = oldBase.replace(/[\\%_]/g, "\\$&") + "-%";
+  const from = oldBase.length + 1; // 1-based position of the "-" before the number
+  const [res] = await conn.query<ResultSetHeader>(
+    `UPDATE units
+     SET internal_serial = CONCAT(?, SUBSTRING(internal_serial, ?)), updated_at = NOW(3)
+     WHERE module_id = ? AND internal_serial LIKE ?
+       AND SUBSTRING(internal_serial, ?) REGEXP '^[0-9]+$'`,
+    [newBase, from, moduleId, pattern, from + 1],
+  );
+  return res.affectedRows;
 }
 
 /** Delete a unit that isn't part of a stock-given record. */

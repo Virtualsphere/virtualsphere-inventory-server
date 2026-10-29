@@ -21,12 +21,11 @@ export const moduleRoutes = Router();
 
 const idParam = z.object({ id: z.string().uuid("invalid module id") });
 
-// GET /api/modules   (optional ?productId= to list one product's modules)
+// GET /api/modules   (optional ?productId= for one product's, ?kind=antenna for antennas only)
 moduleRoutes.get(
   "/",
   asyncHandler(async (req, res) => {
-    const { productId } = parse(listModulesSchema, req.query);
-    res.json(await listModules(productId));
+    res.json(await listModules(parse(listModulesSchema, req.query)));
   }),
 );
 

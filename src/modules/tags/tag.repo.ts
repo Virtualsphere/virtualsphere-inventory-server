@@ -5,6 +5,8 @@ import type { StockIntake, Tag, TagGiven } from "../../types";
 
 interface TagRow extends RowDataPacket {
   id: string;
+  category_id: string;
+  category_name: string;
   name: string;
   description: string;
   in_stock: number;
@@ -17,6 +19,8 @@ interface TagRow extends RowDataPacket {
 function mapTag(row: TagRow): Tag {
   return {
     id: row.id,
+    categoryId: row.category_id,
+    categoryName: row.category_name,
     name: row.name,
     description: row.description,
     inStock: row.in_stock,
@@ -29,15 +33,16 @@ function mapTag(row: TagRow): Tag {
 
 // SUM() yields DECIMAL (a string in mysql2), hence the CAST.
 const SELECT_SQL = `
-  SELECT t.*,
+  SELECT t.*, c.name AS category_name,
          CAST((SELECT COALESCE(SUM(i.quantity), 0) FROM tag_intakes i WHERE i.tag_id = t.id) AS SIGNED)
            AS total_added,
          CAST((SELECT COALESCE(SUM(g.quantity), 0) FROM dispatch_tags g WHERE g.tag_id = t.id) AS SIGNED)
            AS total_given
-  FROM tags t`;
+  FROM tags t
+  JOIN tag_categories c ON c.id = t.category_id`;
 
 export async function listTagRows(): Promise<Tag[]> {
-  const [rows] = await pool.query<TagRow[]>(`${SELECT_SQL} ORDER BY t.name ASC`);
+  const [rows] = await pool.query<TagRow[]>(`${SELECT_SQL} ORDER BY c.name ASC, t.name ASC`);
   return rows.map(mapTag);
 }
 
@@ -51,13 +56,13 @@ export async function findTagById(
 
 export async function insertTag(
   conn: Queryable,
-  data: { name: string; description: string; inStock: number },
+  data: { categoryId: string; name: string; description: string; inStock: number },
 ): Promise<string> {
   // MySQL has no RETURNING: generate the id here.
   const id = randomUUID();
   await conn.query(
-    "INSERT INTO tags (id, name, description, in_stock) VALUES (?, ?, ?, ?)",
-    [id, data.name, data.description, data.inStock],
+    "INSERT INTO tags (id, category_id, name, description, in_stock) VALUES (?, ?, ?, ?, ?)",
+    [id, data.categoryId, data.name, data.description, data.inStock],
   );
   return id;
 }

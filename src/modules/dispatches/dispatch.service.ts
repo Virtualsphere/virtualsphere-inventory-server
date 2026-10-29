@@ -5,6 +5,7 @@ import { badRequest, conflict, notFound } from "../../lib/errors";
 import type { DispatchDetail } from "../../types";
 import { getSettings } from "../settings/settings.repo";
 import { changeTagStock } from "../tags/tag.repo";
+import { listDispatchResources } from "../resources/resource.repo";
 import { listUnitsByDispatch } from "../units/unit.repo";
 import { buildDispatchPdf } from "./dispatch.pdf";
 import {
@@ -182,7 +183,11 @@ export function listDispatchesPaged(
 export async function getDispatch(id: string): Promise<DispatchDetail> {
   const dispatch = await findDispatchById(id);
   if (!dispatch) throw notFound("Dispatch");
-  return { ...dispatch, units: await listUnitsByDispatch(id) };
+  const [units, resources] = await Promise.all([
+    listUnitsByDispatch(id),
+    listDispatchResources(id),
+  ]);
+  return { ...dispatch, units, resources };
 }
 
 /**

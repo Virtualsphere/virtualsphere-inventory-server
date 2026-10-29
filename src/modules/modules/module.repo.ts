@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { pool, type Queryable } from "../../db/pool";
-import type { Module, ModuleWithCounts } from "../../types";
+import type { Module, ModuleWithCounts, ProductKind } from "../../types";
 
 interface ModuleRow extends RowDataPacket {
   id: string;
   product_id: string;
   product_name: string;
+  product_kind: ProductKind;
   name: string;
   sku: string;
   description: string;
@@ -27,6 +28,7 @@ function mapModule(row: ModuleRow): Module {
     id: row.id,
     productId: row.product_id,
     productName: row.product_name,
+    kind: row.product_kind,
     name: row.name,
     sku: row.sku,
     description: row.description,
@@ -75,14 +77,14 @@ export async function insertModule(data: NewModule): Promise<Module> {
 }
 
 const SELECT_SQL = `
-  SELECT m.*, p.name AS product_name
+  SELECT m.*, p.name AS product_name, p.kind AS product_kind
   FROM modules m
   JOIN products p ON p.id = m.product_id`;
 
 // SUM() yields DECIMAL (a string in mysql2) and NULL over zero rows, so the
 // in-stock count is COALESCEd and CAST to an integer.
 const COUNTS_SQL = `
-  SELECT m.*, p.name AS product_name,
+  SELECT m.*, p.name AS product_name, p.kind AS product_kind,
          COUNT(u.id)                                                     AS total_units,
          CAST(COALESCE(SUM(u.status = 'in_stock'), 0) AS SIGNED)         AS in_stock
   FROM modules m
@@ -90,14 +92,24 @@ const COUNTS_SQL = `
   LEFT JOIN units u ON u.module_id = m.id`;
 
 export async function listModulesWithCounts(
-  productId?: string,
+  filter: { productId?: string; kind?: ProductKind } = {},
 ): Promise<ModuleWithCounts[]> {
+  const conds: string[] = [];
+  const params: unknown[] = [];
+  if (filter.productId) {
+    conds.push("m.product_id = ?");
+    params.push(filter.productId);
+  }
+  if (filter.kind) {
+    conds.push("p.kind = ?");
+    params.push(filter.kind);
+  }
   const [rows] = await pool.query<ModuleCountRow[]>(
     `${COUNTS_SQL}
-     ${productId ? "WHERE m.product_id = ?" : ""}
+     ${conds.length ? `WHERE ${conds.join(" AND ")}` : ""}
      GROUP BY m.id
      ORDER BY p.name ASC, m.name ASC`,
-    productId ? [productId] : [],
+    params,
   );
   return rows.map(mapModuleWithCounts);
 }
@@ -122,19 +134,20 @@ export async function findModuleWithCounts(
   return rows[0] ? mapModuleWithCounts(rows[0]) : null;
 }
 
+/** Apply `columns` to a module; false when it doesn't exist. */
 export async function updateModuleRow(
   id: string,
   columns: Record<string, unknown>,
-): Promise<Module | null> {
+  conn: Queryable = pool,
+): Promise<boolean> {
   const keys = Object.keys(columns);
   const setSql = keys.map((k) => `${k} = ?`).join(", ");
   const values = keys.map((k) => columns[k]);
-  const [res] = await pool.query<ResultSetHeader>(
+  const [res] = await conn.query<ResultSetHeader>(
     `UPDATE modules SET ${setSql}, updated_at = NOW(3) WHERE id = ?`,
     [...values, id],
   );
-  if (res.affectedRows === 0) return null;
-  return findModuleById(id);
+  return res.affectedRows > 0;
 }
 
 export async function deleteModuleRow(

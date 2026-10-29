@@ -25,6 +25,7 @@ interface DispatchItemRow extends RowDataPacket {
   module_sku: string;
   product_id: string;
   product_name: string;
+  product_kind: DispatchItem["kind"];
   quantity: number;
 }
 
@@ -36,6 +37,7 @@ function mapItem(row: DispatchItemRow): DispatchItem {
     sku: row.module_sku,
     productId: row.product_id,
     productName: row.product_name,
+    kind: row.product_kind,
     quantity: row.quantity,
   };
 }
@@ -45,6 +47,8 @@ interface DispatchTagRow extends RowDataPacket {
   dispatch_id: string;
   tag_id: string;
   tag_name: string;
+  category_id: string;
+  category_name: string;
   quantity: number;
 }
 
@@ -87,7 +91,7 @@ async function itemsByDispatch(
   const [rows] = await conn.query<DispatchItemRow[]>(
     `SELECT i.id, i.dispatch_id, i.module_id, i.quantity,
             m.name AS module_name, m.sku AS module_sku,
-            p.id AS product_id, p.name AS product_name
+            p.id AS product_id, p.name AS product_name, p.kind AS product_kind
      FROM dispatch_items i
      JOIN modules m ON m.id = i.module_id
      JOIN products p ON p.id = m.product_id
@@ -99,7 +103,7 @@ async function itemsByDispatch(
   return byId;
 }
 
-/** The tag lines of the given hand-overs, grouped by dispatch id, by tag name. */
+/** The tag lines of the given hand-overs, grouped by dispatch id, by category then tag name. */
 async function tagsByDispatch(
   conn: Queryable,
   dispatchIds: string[],
@@ -107,11 +111,13 @@ async function tagsByDispatch(
   const byId = new Map<string, DispatchTag[]>(dispatchIds.map((id) => [id, []]));
   if (dispatchIds.length === 0) return byId;
   const [rows] = await conn.query<DispatchTagRow[]>(
-    `SELECT g.id, g.dispatch_id, g.tag_id, g.quantity, t.name AS tag_name
+    `SELECT g.id, g.dispatch_id, g.tag_id, g.quantity, t.name AS tag_name,
+            c.id AS category_id, c.name AS category_name
      FROM dispatch_tags g
      JOIN tags t ON t.id = g.tag_id
+     JOIN tag_categories c ON c.id = t.category_id
      WHERE g.dispatch_id IN (?)
-     ORDER BY t.name ASC`,
+     ORDER BY c.name ASC, t.name ASC`,
     [dispatchIds],
   );
   for (const row of rows) {
@@ -119,6 +125,8 @@ async function tagsByDispatch(
       id: row.id,
       tagId: row.tag_id,
       tagName: row.tag_name,
+      categoryId: row.category_id,
+      categoryName: row.category_name,
       quantity: row.quantity,
     });
   }
@@ -277,11 +285,12 @@ export async function listDispatches(opts: {
                    WHERE si.dispatch_id = d.id
                      AND (sp.name LIKE ? OR sm.name LIKE ? OR sm.sku LIKE ?))
         OR EXISTS (SELECT 1 FROM dispatch_tags tg JOIN tags st ON st.id = tg.tag_id
-                   WHERE tg.dispatch_id = d.id AND st.name LIKE ?)
+                   JOIN tag_categories sc ON sc.id = st.category_id
+                   WHERE tg.dispatch_id = d.id AND (st.name LIKE ? OR sc.name LIKE ?))
         OR EXISTS (SELECT 1 FROM units su WHERE su.dispatch_id = d.id
                    AND (su.internal_serial LIKE ? OR su.manufacturer_serial LIKE ?)))`,
     );
-    params.push(like, like, like, like, like, like, like, like, like, like);
+    params.push(like, like, like, like, like, like, like, like, like, like, like);
   }
   const where = conds.length ? `WHERE ${conds.join(" AND ")}` : "";
 

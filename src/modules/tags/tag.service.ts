@@ -22,6 +22,11 @@ import type {
 
 /** MySQL: cannot delete a parent row, a foreign key restricts it (errno 1451). */
 const ROW_IS_REFERENCED = "ER_ROW_IS_REFERENCED_2";
+/** MySQL: a foreign key points at a missing row (errno 1452). */
+const NO_REFERENCED_ROW = "ER_NO_REFERENCED_ROW_2";
+
+const isMissingCategory = (err: unknown) =>
+  (err as { code?: string } | null)?.code === NO_REFERENCED_ROW;
 
 function todayISO(): string {
   return new Date().toISOString().slice(0, 10);
@@ -35,6 +40,7 @@ export async function createTag(
     const id = await withTransaction(async (conn) => {
       const quantity = input.quantity ?? 0;
       const tagId = await insertTag(conn, {
+        categoryId: input.categoryId,
         name: input.name,
         description: input.description,
         inStock: quantity,
@@ -53,6 +59,7 @@ export async function createTag(
     return (await findTagById(id))!;
   } catch (err) {
     if (isUnique(err)) throw conflict(`Tag "${input.name}" already exists`);
+    if (isMissingCategory(err)) throw notFound("Category");
     throw err;
   }
 }
@@ -70,12 +77,14 @@ export async function getTag(id: string): Promise<TagDetail> {
 
 export async function updateTag(id: string, patch: UpdateTagInput): Promise<Tag> {
   const columns: Record<string, unknown> = {};
+  if (patch.categoryId !== undefined) columns["category_id"] = patch.categoryId;
   if (patch.name !== undefined) columns["name"] = patch.name;
   if (patch.description !== undefined) columns["description"] = patch.description;
   try {
     if (!(await updateTagRow(id, columns))) throw notFound("Tag");
   } catch (err) {
     if (isUnique(err)) throw conflict(`Tag "${patch.name}" already exists`);
+    if (isMissingCategory(err)) throw notFound("Category");
     throw err;
   }
   return (await findTagById(id))!;

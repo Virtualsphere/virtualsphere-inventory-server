@@ -22,6 +22,7 @@ import {
   type ListUnitsResult,
   maxSeq,
   maxSerialNumber,
+  renameSerialBase,
   updateUnitRow,
 } from "./unit.repo";
 import type {
@@ -41,6 +42,7 @@ interface LockedModuleRow extends RowDataPacket {
   sku: string;
   product_id: string;
   product_name: string;
+  product_kind: UnitView["kind"];
   warranty_months: number;
   serial_prefix: string | null;
 }
@@ -63,7 +65,7 @@ function duplicateSerialConflict(err: unknown, fallback: string) {
 }
 
 /** The module columns that decide what its generated serials look like. */
-interface SerialModule {
+export interface SerialModule {
   id: string;
   name: string;
   sku: string;
@@ -85,6 +87,38 @@ async function nextSerialNumber(
   settings: Settings,
 ): Promise<number> {
   return (await maxSerialNumber(conn, mod.id, moduleSerialBase(mod, settings))) + 1;
+}
+
+/**
+ * After a module's serial prefix (override) changed from `before` to `after`,
+ * give its existing generated serials the new prefix, numbers unchanged. Run
+ * it in the transaction that changed the module, with the module row locked
+ * (the lock intake takes). A clash with a serial already in use throws 409
+ * and the whole change rolls back.
+ */
+export async function reprefixSerials(
+  conn: Queryable,
+  before: SerialModule,
+  after: SerialModule,
+): Promise<number> {
+  const settings = await getSettings(conn);
+  const oldBase = moduleSerialBase(before, settings);
+  const newBase = moduleSerialBase(after, settings);
+  if (oldBase === newBase) return 0;
+  try {
+    return await renameSerialBase(conn, before.id, oldBase, newBase);
+  } catch (err) {
+    if (isUnique(err)) {
+      const value = /Duplicate entry '(.*)' for key/.exec(
+        (err as { sqlMessage?: string }).sqlMessage ?? "",
+      )?.[1];
+      throw conflict(
+        `Can't change the prefix: ${value ? `serial "${value}"` : "a renamed serial"} is already in use. ` +
+          "Edit or delete that unit first.",
+      );
+    }
+    throw err;
+  }
 }
 
 /**
@@ -138,7 +172,7 @@ export async function intake(input: IntakeInput): Promise<IntakeResult> {
   return withTransaction(async (conn) => {
     const [locked] = await conn.query<LockedModuleRow[]>(
       `SELECT m.id, m.name, m.sku, m.warranty_months, m.serial_prefix,
-              p.id AS product_id, p.name AS product_name
+              p.id AS product_id, p.name AS product_name, p.kind AS product_kind
        FROM modules m
        JOIN products p ON p.id = m.product_id
        WHERE m.id = ?
@@ -229,6 +263,7 @@ export async function intake(input: IntakeInput): Promise<IntakeResult> {
       sku: mod.sku,
       productId: mod.product_id,
       productName: mod.product_name,
+      kind: mod.product_kind,
     }));
     return { created: units.length, units };
   });

@@ -1,5 +1,5 @@
 import { conflict, isUniqueViolation as isUnique, notFound } from "../../lib/errors";
-import type { Product, ProductWithCounts } from "../../types";
+import type { Product, ProductKind, ProductWithCounts } from "../../types";
 import {
   deleteProductRow,
   findProductById,
@@ -21,6 +21,7 @@ export async function createProduct(
 ): Promise<Product> {
   try {
     return await insertProduct({
+      kind: input.kind ?? "module",
       name: input.name,
       description: input.description,
     });
@@ -30,8 +31,8 @@ export async function createProduct(
   }
 }
 
-export function listProducts(): Promise<ProductWithCounts[]> {
-  return listProductsWithCounts();
+export function listProducts(kind?: ProductKind): Promise<ProductWithCounts[]> {
+  return listProductsWithCounts(kind);
 }
 
 export async function getProduct(id: string): Promise<ProductWithCounts> {
@@ -48,6 +49,7 @@ export async function updateProduct(
   if (!existing) throw notFound("Product");
 
   const columns: Record<string, unknown> = {};
+  if (patch.kind !== undefined) columns["kind"] = patch.kind;
   if (patch.name !== undefined) columns["name"] = patch.name;
   if (patch.description !== undefined) columns["description"] = patch.description;
 

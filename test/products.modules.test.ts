@@ -57,7 +57,7 @@ describe.skipIf(!TEST_DB)("products and modules", () => {
     const withCounts = await products.getProduct(p.id);
     expect(withCounts).toMatchObject({ moduleCount: 2, totalUnits: 5, inStock: 5 });
 
-    const list = await modules.listModules(p.id);
+    const list = await modules.listModules({ productId: p.id });
     expect(list.map((m) => [m.name, m.inStock])).toEqual([
       ["Antenna", 3],
       ["Controller", 2],

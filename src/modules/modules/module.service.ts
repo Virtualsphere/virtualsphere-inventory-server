@@ -1,11 +1,12 @@
+import type { RowDataPacket } from "mysql2/promise";
 import { withTransaction } from "../../db/pool";
 import { conflict, isUniqueViolation as isUnique, notFound } from "../../lib/errors";
-import type { Module, ModuleWithCounts } from "../../types";
+import type { Module, ModuleWithCounts, ProductKind } from "../../types";
 import { getSettings } from "../settings/settings.repo";
 import { findProductById } from "../products/product.repo";
 import { moduleResourceTotals } from "../resources/resource.repo";
 import { moveResources } from "../resources/resource.service";
-import { syncNextSeq } from "../units/unit.service";
+import { reprefixSerials, type SerialModule, syncNextSeq } from "../units/unit.service";
 import {
   deleteModuleRow,
   findModuleById,
@@ -43,8 +44,10 @@ export async function createModule(
   }
 }
 
-export function listModules(productId?: string): Promise<ModuleWithCounts[]> {
-  return listModulesWithCounts(productId);
+export function listModules(
+  filter: { productId?: string; kind?: ProductKind } = {},
+): Promise<ModuleWithCounts[]> {
+  return listModulesWithCounts(filter);
 }
 
 export async function getModule(id: string): Promise<ModuleWithCounts> {
@@ -74,22 +77,28 @@ export async function updateModule(
     columns["serial_prefix"] = patch.serialPrefix;
 
   try {
-    const updated = await updateModuleRow(id, columns);
-    if (!updated) throw notFound("Module");
-    // The SKU, name and prefix decide which serials count as generated ones.
-    if (
-      patch.sku !== undefined ||
-      patch.name !== undefined ||
-      patch.serialPrefix !== undefined
-    ) {
-      await syncNextSeq(id);
-      return (await findModuleById(id))!;
-    }
-    return updated;
+    await withTransaction(async (conn) => {
+      // The lock intake takes, so no units are added while serials are renamed.
+      const [rows] = await conn.query<(SerialModule & RowDataPacket)[]>(
+        "SELECT id, name, sku, serial_prefix FROM modules WHERE id = ? FOR UPDATE",
+        [id],
+      );
+      const before = rows[0];
+      if (!before || !(await updateModuleRow(id, columns, conn))) throw notFound("Module");
+      // Existing units' generated serials follow a changed prefix (override).
+      if (patch.serialPrefix !== undefined) {
+        await reprefixSerials(conn, before, { ...before, serial_prefix: patch.serialPrefix });
+      }
+    });
   } catch (err) {
     if (isUnique(err)) throw conflict(`SKU "${patch.sku}" is already in use`);
     throw err;
   }
+  // The SKU, name and prefix decide which serials count as generated ones.
+  if (patch.sku !== undefined || patch.name !== undefined || patch.serialPrefix !== undefined) {
+    await syncNextSeq(id);
+  }
+  return (await findModuleById(id))!;
 }
 
 /**

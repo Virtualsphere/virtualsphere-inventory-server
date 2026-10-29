@@ -1,8 +1,9 @@
 /**
  * Tags: stock by quantity only. Creating with opening stock, adding stock,
  * giving tags alone or with modules on one hand-over, refusing more than is
- * in stock, and undo putting tags back. Needs TEST_DB_NAME; wipes
- * dispatches/tags/products/modules/units there.
+ * in stock, undo putting tags back, and tag categories (RS232 cables… given
+ * the same way). Needs TEST_DB_NAME; wipes dispatches/tags/tag
+ * categories/products/modules/units there.
  */
 import "dotenv/config";
 import { randomUUID } from "node:crypto";
@@ -20,10 +21,12 @@ describe.skipIf(!TEST_DB)("tags", () => {
   let pool: Pool;
   let tags: typeof import("../src/modules/tags/tag.service");
   let tagSchema: typeof import("../src/modules/tags/tag.schema");
+  let categories: typeof import("../src/modules/tags/category.service");
   let svc: typeof import("../src/modules/dispatches/dispatch.service");
   let schema: typeof import("../src/modules/dispatches/dispatch.schema");
   let moduleId: string;
   let tagId: string;
+  let categoryId: string;
 
   beforeAll(async () => {
     const { runMigrations } = await import("../src/db/migrate");
@@ -32,6 +35,7 @@ describe.skipIf(!TEST_DB)("tags", () => {
     ({ pool } = await import("../src/db/pool"));
     tags = await import("../src/modules/tags/tag.service");
     tagSchema = await import("../src/modules/tags/tag.schema");
+    categories = await import("../src/modules/tags/category.service");
     svc = await import("../src/modules/dispatches/dispatch.service");
     schema = await import("../src/modules/dispatches/dispatch.schema");
     const units = await import("../src/modules/units/unit.service");
@@ -39,6 +43,7 @@ describe.skipIf(!TEST_DB)("tags", () => {
 
     await pool.query("DELETE FROM dispatches");
     await pool.query("DELETE FROM tags");
+    await pool.query("DELETE FROM tag_categories");
     await pool.query("DELETE FROM units");
     await pool.query("DELETE FROM modules");
     await pool.query("DELETE FROM products");
@@ -52,6 +57,7 @@ describe.skipIf(!TEST_DB)("tags", () => {
       [moduleId, productId],
     );
     await units.intake(unitSchema.intakeSchema.parse({ moduleId, quantity: 3 }));
+    categoryId = (await categories.createCategory({ name: "Tag" })).id;
   });
 
   afterAll(async () => {
@@ -67,14 +73,13 @@ describe.skipIf(!TEST_DB)("tags", () => {
   const give = (body: Record<string, unknown>) =>
     svc.createDispatch(schema.createDispatchSchema.parse({ ...header, ...body }), null);
   const stock = async () => (await tags.getTag(tagId)).inStock;
+  const newTag = (body: Record<string, unknown>, category = categoryId) =>
+    tags.createTag(tagSchema.createTagSchema.parse({ categoryId: category, ...body }), null);
 
   it("creates a tag with opening stock and adds more", async () => {
-    const t = await tags.createTag(
-      tagSchema.createTagSchema.parse({ name: "VST-JTL03", quantity: 1000 }),
-      null,
-    );
+    const t = await newTag({ name: "VST-JTL03", quantity: 1000 });
     tagId = t.id;
-    expect(t).toMatchObject({ inStock: 1000, totalAdded: 1000, totalGiven: 0 });
+    expect(t).toMatchObject({ categoryId, categoryName: "Tag", inStock: 1000, totalAdded: 1000, totalGiven: 0 });
 
     const more = await tags.addTagStock(
       tagId,
@@ -87,9 +92,7 @@ describe.skipIf(!TEST_DB)("tags", () => {
   });
 
   it("refuses a duplicate tag name (case-insensitive)", async () => {
-    await expect(
-      tags.createTag(tagSchema.createTagSchema.parse({ name: "vst-jtl03" }), null),
-    ).rejects.toMatchObject({ status: 409 });
+    await expect(newTag({ name: "vst-jtl03" })).rejects.toMatchObject({ status: 409 });
   });
 
   it("gives only tags, with no validity date", async () => {
@@ -97,7 +100,9 @@ describe.skipIf(!TEST_DB)("tags", () => {
     expect(d.items).toEqual([]);
     expect(d.units).toEqual([]);
     expect(d.validUntil).toBeNull();
-    expect(d.tags).toMatchObject([{ tagId, tagName: "VST-JTL03", quantity: 200 }]);
+    expect(d.tags).toMatchObject([
+      { tagId, tagName: "VST-JTL03", categoryId, categoryName: "Tag", quantity: 200 },
+    ]);
     expect(d.tagQuantity).toBe(200);
     expect(await stock()).toBe(1300);
 
@@ -172,13 +177,82 @@ describe.skipIf(!TEST_DB)("tags", () => {
   });
 
   it("undoes an intake that is still in stock", async () => {
-    const t = await tags.createTag(
-      tagSchema.createTagSchema.parse({ name: "UHF-W1", quantity: 50 }),
-      null,
-    );
+    const t = await newTag({ name: "UHF-W1", quantity: 50 });
     const [intake] = (await tags.getTag(t.id)).intakes;
     const after = await tags.deleteTagIntake(t.id, intake!.id);
     expect(after).toMatchObject({ inStock: 0, totalAdded: 0 });
     await tags.deleteTag(t.id);
+  });
+
+  describe("categories", () => {
+    let cableCat: string;
+    let cableId: string;
+
+    it("creates a category; names are unique case-insensitively", async () => {
+      const c = await categories.createCategory({ name: "RS232 Cable" });
+      cableCat = c.id;
+      expect(c).toMatchObject({ name: "RS232 Cable", tagCount: 0 });
+      await expect(categories.createCategory({ name: "rs232 cable" })).rejects.toMatchObject({
+        status: 409,
+      });
+    });
+
+    it("requires a category that exists to create a tag", async () => {
+      expect(tagSchema.createTagSchema.safeParse({ name: "No cat" }).success).toBe(false);
+      await expect(newTag({ name: "Ghost" }, randomUUID())).rejects.toMatchObject({ status: 404 });
+    });
+
+    it("stocks and gives an item of another category with tags and a module", async () => {
+      const cable = await newTag({ name: "RS232 1.5m", quantity: 20 }, cableCat);
+      cableId = cable.id;
+      expect(cable).toMatchObject({ categoryName: "RS232 Cable", inStock: 20 });
+
+      const d = await give({
+        invoiceNo: "INV-CAT",
+        items: [{ moduleId, quantity: 1 }],
+        tags: [
+          { tagId, quantity: 10 },
+          { tagId: cableId, quantity: 2 },
+        ],
+        validUntil: "2027-10-27",
+      });
+      // Ordered by category, then name.
+      expect(d.tags).toMatchObject([
+        { tagId: cableId, categoryName: "RS232 Cable", quantity: 2 },
+        { tagId, categoryName: "Tag", quantity: 10 },
+      ]);
+      expect((await tags.getTag(cableId)).inStock).toBe(18);
+
+      const found = await svc.listDispatchesPaged(
+        schema.listDispatchesSchema.parse({ q: "rs232 cable" }),
+      );
+      expect(found.items.map((r) => r.id)).toContain(d.id);
+
+      const { pdf } = await svc.getDispatchPdf(d.id);
+      expect(pdf.subarray(0, 5).toString()).toBe("%PDF-");
+
+      await svc.deleteDispatch(d.id);
+      expect((await tags.getTag(cableId)).inStock).toBe(20);
+    });
+
+    it("moves a tag to another category", async () => {
+      const moved = await tags.updateTag(
+        cableId,
+        tagSchema.updateTagSchema.parse({ categoryId }),
+      );
+      expect(moved.categoryName).toBe("Tag");
+      await tags.updateTag(cableId, tagSchema.updateTagSchema.parse({ categoryId: cableCat }));
+    });
+
+    it("renames, and won't delete a category that has items", async () => {
+      const renamed = await categories.renameCategory(cableCat, { name: "Cable" });
+      expect(renamed).toMatchObject({ name: "Cable", tagCount: 1 });
+      expect((await tags.getTag(cableId)).categoryName).toBe("Cable");
+
+      await expect(categories.deleteCategory(cableCat)).rejects.toMatchObject({ status: 409 });
+      await tags.deleteTag(cableId);
+      await categories.deleteCategory(cableCat);
+      expect((await categories.listCategories()).map((c) => c.name)).toEqual(["Tag"]);
+    });
   });
 });

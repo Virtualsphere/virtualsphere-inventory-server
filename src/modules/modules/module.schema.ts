@@ -41,6 +41,7 @@ export const updateModuleSchema = z
 
 export const listModulesSchema = z.object({
   productId: z.string().uuid().optional(),
+  kind: z.enum(["module", "antenna"]).optional(),
 });
 
 export type CreateModuleInput = z.infer<typeof createModuleSchema>;

@@ -12,12 +12,14 @@ const quantity = z.number().int().min(1).max(MAX_TAG_QUANTITY);
 // Base field definitions WITHOUT defaults, so the update schema (which is a
 // partial of these) never resurrects a default and silently overwrites a field.
 const fields = {
+  categoryId: z.string().uuid("invalid category id"),
   name: z.string().trim().min(1).max(200),
   description: z.string().trim().max(2000),
 } as const;
 
-/** Create a tag, optionally with its first stock. */
+/** Create a tag in a category, optionally with its first stock. */
 export const createTagSchema = z.object({
+  categoryId: fields.categoryId,
   name: fields.name,
   description: fields.description.optional().default(""),
   quantity: quantity.optional(),

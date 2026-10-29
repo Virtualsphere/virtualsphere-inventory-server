@@ -5,6 +5,7 @@ import { parse } from "../../lib/validate";
 import { requireAdmin } from "../../middleware/auth";
 import {
   createProductSchema,
+  listProductsSchema,
   updateProductSchema,
 } from "./product.schema";
 import {
@@ -20,11 +21,12 @@ export const productRoutes = Router();
 
 const idParam = z.object({ id: z.string().uuid("invalid product id") });
 
-// GET /api/products   (with module / unit counts)
+// GET /api/products   (with module / unit counts; optional ?kind=module|antenna)
 productRoutes.get(
   "/",
-  asyncHandler(async (_req, res) => {
-    res.json(await listProducts());
+  asyncHandler(async (req, res) => {
+    const { kind } = parse(listProductsSchema, req.query);
+    res.json(await listProducts(kind));
   }),
 );
 
@@ -52,7 +54,7 @@ productRoutes.get(
   asyncHandler(async (req, res) => {
     const { id } = parse(idParam, req.params);
     await getProduct(id); // 404 for an unknown product rather than []
-    res.json(await listModules(id));
+    res.json(await listModules({ productId: id }));
   }),
 );
 

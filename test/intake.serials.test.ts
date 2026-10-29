@@ -1,7 +1,7 @@
 /**
  * Editable serials: intake overrides for internal serials, generated serials
  * skipping ones already taken by a hand-edited unit, and PATCHing either
- * serial afterwards. Like the concurrency test, this needs TEST_DB_NAME and
+ * serial afterwards, and existing serials following a changed prefix override. Like the concurrency test, this needs TEST_DB_NAME and
  * wipes products/modules/units in that database.
  */
 import "dotenv/config";
@@ -131,5 +131,56 @@ describe.skipIf(!TEST_DB)("editable serials", () => {
     expect(await nextSeq()).toBe(5);
     r = await intake({ quantity: 1 });
     expect(r.units[0]!.internalSerial).toBe("SW1-00005");
+  });
+
+  describe("changing the serial prefix override", () => {
+    let modules: typeof import("../src/modules/modules/module.service");
+    let moduleSchema: typeof import("../src/modules/modules/module.schema");
+    let units: string[];
+    const serials = async () => {
+      const [rows] = await pool.query<RowDataPacket[]>(
+        "SELECT internal_serial FROM units WHERE module_id = ? ORDER BY internal_serial",
+        [moduleId],
+      );
+      return rows.map((r) => r["internal_serial"] as string);
+    };
+    const update = (patch: Record<string, unknown>) =>
+      modules.updateModule(moduleId, moduleSchema.updateModuleSchema.parse(patch));
+    const setPrefix = (serialPrefix: string | null) => update({ serialPrefix });
+
+    beforeAll(async () => {
+      modules = await import("../src/modules/modules/module.service");
+      moduleSchema = await import("../src/modules/modules/module.schema");
+      await pool.query("DELETE FROM units WHERE module_id = ?", [moduleId]);
+      await pool.query("UPDATE modules SET serial_prefix = NULL WHERE id = ?", [moduleId]);
+      units = (await intake({ quantity: 3, internalSerials: [null, null, "HAND-1"] })).units.map((u) => u.id);
+    });
+
+    it("renames existing generated serials, keeping numbers and hand-typed ones", async () => {
+      const m = await setPrefix("zz");
+      expect(m.serialPrefix).toBe("ZZ");
+      expect(await serials()).toEqual(["HAND-1", "ZZ-SW1-00001", "ZZ-SW1-00002"]);
+
+      // New units continue the numbering under the new prefix.
+      const r = await intake({ quantity: 1 });
+      expect(r.units[0]!.internalSerial).toBe("ZZ-SW1-00003");
+    });
+
+    it("clearing the override goes back to the global prefix for old units too", async () => {
+      await setPrefix(null);
+      expect(await serials()).toEqual(["HAND-1", "SW1-00001", "SW1-00002", "SW1-00003"]);
+    });
+
+    it("saving the same prefix again changes nothing", async () => {
+      await update({ serialPrefix: null, name: "Serial Widget" });
+      expect(await serials()).toEqual(["HAND-1", "SW1-00001", "SW1-00002", "SW1-00003"]);
+    });
+
+    it("refuses a prefix whose serials clash, and changes nothing", async () => {
+      await svc.updateUnit(units[2]!, { internalSerial: "QQ-SW1-00001" });
+      await expect(setPrefix("QQ")).rejects.toMatchObject({ status: 409 });
+      expect(await serials()).toEqual(["QQ-SW1-00001", "SW1-00001", "SW1-00002", "SW1-00003"]);
+      expect((await modules.getModule(moduleId)).serialPrefix).toBeNull();
+    });
   });
 });

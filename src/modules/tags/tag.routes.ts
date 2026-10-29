@@ -29,7 +29,7 @@ tagRoutes.get(
   }),
 );
 
-// POST /api/tags   (optionally with a first quantity)
+// POST /api/tags   (in a category, optionally with a first quantity)
 tagRoutes.post(
   "/",
   asyncHandler(async (req, res) => {
@@ -47,7 +47,7 @@ tagRoutes.get(
   }),
 );
 
-// PATCH /api/tags/:id   (name, description)
+// PATCH /api/tags/:id   (category, name, description)
 tagRoutes.patch(
   "/:id",
   asyncHandler(async (req, res) => {

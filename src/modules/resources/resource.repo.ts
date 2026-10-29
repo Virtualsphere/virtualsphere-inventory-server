@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { pool, type Queryable } from "../../db/pool";
-import type { Resource, ResourceUsage, StockIntake, UnitResource } from "../../types";
+import type {
+  DispatchResource,
+  Resource,
+  ResourceUsage,
+  StockIntake,
+  UnitResource,
+} from "../../types";
 
 interface ResourceRow extends RowDataPacket {
   id: string;
@@ -213,6 +219,32 @@ export async function listResourceUsage(resourceId: string): Promise<ResourceUsa
     productName: r.product_name,
     units: r.units,
     quantity: r.quantity,
+  }));
+}
+
+/**
+ * The resources in a hand-over's units, totalled per module line — counting
+ * the units still linked to it, like its serial list.
+ */
+export async function listDispatchResources(dispatchId: string): Promise<DispatchResource[]> {
+  const [rows] = await pool.query<RowDataPacket[]>(
+    `SELECT u.module_id, ur.resource_id, r.name AS resource_name,
+            COUNT(*) AS units,
+            CAST(SUM(ur.quantity) AS SIGNED) AS quantity
+     FROM units u
+     JOIN unit_resources ur ON ur.unit_id = u.id
+     JOIN resources r ON r.id = ur.resource_id
+     WHERE u.dispatch_id = ?
+     GROUP BY u.module_id, ur.resource_id
+     ORDER BY r.name ASC`,
+    [dispatchId],
+  );
+  return rows.map((r) => ({
+    moduleId: String(r["module_id"]),
+    resourceId: String(r["resource_id"]),
+    resourceName: String(r["resource_name"]),
+    units: Number(r["units"]),
+    quantity: Number(r["quantity"]),
   }));
 }
 

@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import type { ResultSetHeader, RowDataPacket } from "mysql2/promise";
 import { pool } from "../../db/pool";
-import type { Product, ProductWithCounts } from "../../types";
+import type { Product, ProductKind, ProductWithCounts } from "../../types";
 
 interface ProductRow extends RowDataPacket {
   id: string;
+  kind: ProductKind;
   name: string;
   description: string;
   created_at: Date;
@@ -20,6 +21,7 @@ type ProductCountRow = ProductRow & {
 function mapProduct(row: ProductRow): Product {
   return {
     id: row.id,
+    kind: row.kind,
     name: row.name,
     description: row.description,
     createdAt: row.created_at.toISOString(),
@@ -37,6 +39,7 @@ function mapProductWithCounts(row: ProductCountRow): ProductWithCounts {
 }
 
 export interface NewProduct {
+  kind: ProductKind;
   name: string;
   description: string;
 }
@@ -45,8 +48,8 @@ export async function insertProduct(data: NewProduct): Promise<Product> {
   // MySQL has no RETURNING: generate the id here, insert, then read it back.
   const id = randomUUID();
   await pool.query(
-    "INSERT INTO products (id, name, description) VALUES (?, ?, ?)",
-    [id, data.name, data.description],
+    "INSERT INTO products (id, kind, name, description) VALUES (?, ?, ?, ?)",
+    [id, data.kind, data.name, data.description],
   );
   return (await findProductById(id))!;
 }
@@ -69,11 +72,15 @@ const COUNTS_SQL = `
     GROUP BY module_id
   ) mc ON mc.module_id = m.id`;
 
-export async function listProductsWithCounts(): Promise<ProductWithCounts[]> {
+export async function listProductsWithCounts(
+  kind?: ProductKind,
+): Promise<ProductWithCounts[]> {
   const [rows] = await pool.query<ProductCountRow[]>(
     `${COUNTS_SQL}
+     ${kind ? "WHERE p.kind = ?" : ""}
      GROUP BY p.id
      ORDER BY p.name ASC`,
+    kind ? [kind] : [],
   );
   return rows.map(mapProductWithCounts);
 }

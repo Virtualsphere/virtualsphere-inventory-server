@@ -8,7 +8,8 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import PDFDocument from "pdfkit";
-import type { DispatchDetail, Settings, UnitView } from "../../types";
+import { PRODUCT_KINDS } from "../../types";
+import type { DispatchDetail, ProductKind, Settings, UnitView } from "../../types";
 
 /** logo.png at the project root (same path from src/ and dist/). */
 const LOGO_PATH = join(__dirname, "..", "..", "..", "logo.png");
@@ -50,8 +51,12 @@ export function buildDispatchPdf(
 
   header(doc, d, left, width);
   parties(doc, d, left, width);
-  if (d.items.length) itemsTable(doc, d, left, width);
-  if (d.tags.length) tagsTable(doc, d, left, width);
+  for (const kind of PRODUCT_KINDS) {
+    const items = d.items.filter((it) => it.kind === kind);
+    if (items.length) itemsTable(doc, kind, items, left, width);
+  }
+  if (d.resources.length) resourcesTable(doc, d, left, width);
+  for (const group of tagGroups(d)) tagsTable(doc, group, left, width);
   if (d.items.length) serials(doc, d, left, width);
   notesAndSignatures(doc, d, settings, left, width);
   footers(doc, d, settings);
@@ -113,7 +118,7 @@ function parties(doc: Doc, d: DispatchDetail, left: number, width: number): void
   if (d.items.length) {
     details.push(["Warranty till", d.validUntil ?? "—"], ["Total units", String(d.quantity)]);
   }
-  if (d.tags.length) details.push(["Total tags", String(d.tagQuantity)]);
+  for (const g of tagGroups(d)) details.push([`Total ${g.name}`, String(g.quantity)]);
   const yRight = block(left + colW + 20, "Details", details);
   doc.y = Math.max(yLeft, yRight) + 10;
 }
@@ -159,49 +164,109 @@ function sectionTitle(doc: Doc, title: string, left: number): void {
   doc.y += 6;
 }
 
-function itemsTable(doc: Doc, d: DispatchDetail, left: number, width: number): void {
-  sectionTitle(doc, "Products", left);
+/** The hand-over's module lines, or its antenna lines, as one table. */
+function itemsTable(
+  doc: Doc,
+  kind: ProductKind,
+  items: DispatchDetail["items"],
+  left: number,
+  width: number,
+): void {
+  const antenna = kind === "antenna";
+  sectionTitle(doc, antenna ? "Antennas" : "Products", left);
   const cols: Col[] = [
     { title: "#", w: 26 },
     { title: "Product", w: 165 },
-    { title: "Module", w: 165 },
+    { title: antenna ? "Antenna" : "Module", w: 165 },
     { title: "SKU", w: width - 26 - 165 - 165 - 60 },
     { title: "Qty", w: 60, align: "right" },
   ];
   const head = () => row(doc, cols, cols.map((c) => c.title.toUpperCase()), left, { bold: true, fill: FILL, size: 8 });
   head();
-  d.items.forEach((it, i) => {
+  items.forEach((it, i) => {
     if (doc.y + 30 > doc.page.height - MARGIN - FOOTER_H) {
       doc.addPage();
       head();
     }
     row(doc, cols, [String(i + 1), it.productName, it.moduleName, it.sku, String(it.quantity)], left);
   });
-  row(doc, cols, ["", "", "", "Total", String(d.quantity)], left, { bold: true });
+  const total = items.reduce((n, it) => n + it.quantity, 0);
+  row(doc, cols, ["", "", "", "Total", String(total)], left, { bold: true });
   doc.y += 14;
 }
 
-function tagsTable(doc: Doc, d: DispatchDetail, left: number, width: number): void {
-  sectionTitle(doc, "Tags", left);
+/** What the given units were built with: one row per line and resource. */
+function resourcesTable(doc: Doc, d: DispatchDetail, left: number, width: number): void {
+  sectionTitle(doc, "Resources used", left);
   const cols: Col[] = [
     { title: "#", w: 26 },
-    { title: "Tag", w: width - 26 - 60 },
+    { title: "Product · item", w: 220 },
+    { title: "Resource", w: width - 26 - 220 - 60 - 60 },
+    { title: "Units", w: 60, align: "right" },
     { title: "Qty", w: 60, align: "right" },
   ];
   const head = () => row(doc, cols, cols.map((c) => c.title.toUpperCase()), left, { bold: true, fill: FILL, size: 8 });
   head();
-  d.tags.forEach((t, i) => {
+  let n = 0;
+  for (const it of d.items) {
+    for (const r of d.resources.filter((x) => x.moduleId === it.moduleId)) {
+      if (doc.y + 30 > doc.page.height - MARGIN - FOOTER_H) {
+        doc.addPage();
+        head();
+      }
+      row(
+        doc,
+        cols,
+        [String(++n), `${it.productName} · ${it.moduleName}`, r.resourceName, String(r.units), String(r.quantity)],
+        left,
+      );
+    }
+  }
+  doc.y += 14;
+}
+
+interface TagGroup {
+  name: string;
+  quantity: number;
+  tags: DispatchDetail["tags"];
+}
+
+/** The tag lines split by category ("Tag", "RS232 Cable"…), in the order given. */
+function tagGroups(d: DispatchDetail): TagGroup[] {
+  const groups = new Map<string, TagGroup>();
+  for (const t of d.tags) {
+    let g = groups.get(t.categoryId);
+    if (!g) groups.set(t.categoryId, (g = { name: t.categoryName, quantity: 0, tags: [] }));
+    g.quantity += t.quantity;
+    g.tags.push(t);
+  }
+  return [...groups.values()];
+}
+
+/** One table per category of the hand-over's tag lines. */
+function tagsTable(doc: Doc, g: TagGroup, left: number, width: number): void {
+  sectionTitle(doc, g.name, left);
+  const cols: Col[] = [
+    { title: "#", w: 26 },
+    { title: "Item", w: width - 26 - 60 },
+    { title: "Qty", w: 60, align: "right" },
+  ];
+  const head = () => row(doc, cols, cols.map((c) => c.title.toUpperCase()), left, { bold: true, fill: FILL, size: 8 });
+  head();
+  g.tags.forEach((t, i) => {
     if (doc.y + 30 > doc.page.height - MARGIN - FOOTER_H) {
       doc.addPage();
       head();
     }
     row(doc, cols, [String(i + 1), t.tagName, String(t.quantity)], left);
   });
-  row(doc, cols, ["", "Total", String(d.tagQuantity)], left, { bold: true });
+  row(doc, cols, ["", "Total", String(g.quantity)], left, { bold: true });
   doc.y += 14;
 }
 
 function serials(doc: Doc, d: DispatchDetail, left: number, width: number): void {
+  // Keep the heading with the first line's serials.
+  ensureSpace(doc, 100);
   sectionTitle(doc, "Serial numbers", left);
   // Internal serials only (supplier serials stay internal), four per row.
   const PER_ROW = 4;

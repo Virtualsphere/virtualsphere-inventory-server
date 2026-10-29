@@ -3,8 +3,11 @@ import { pool } from "../../db/pool";
 import { getSettings } from "../settings/settings.repo";
 
 export interface StatsTotals {
+  /** Module products (antenna products are counted in `antennas` by model). */
   products: number;
   modules: number;
+  /** Antenna models. */
+  antennas: number;
   units: number;
   inStock: number;
   sold: number;
@@ -12,9 +15,10 @@ export interface StatsTotals {
   defective: number;
 }
 
-/** A module at or below the low-stock threshold. */
+/** A module (or antenna) at or below the low-stock threshold. */
 export interface LowStockModule {
   id: string;
+  kind: "module" | "antenna";
   name: string;
   sku: string;
   productName: string;
@@ -34,8 +38,11 @@ export async function getStats(): Promise<Stats> {
   // each conditional count is COALESCEd and CAST to an integer.
   const [totalsRows] = await pool.query<RowDataPacket[]>(
     `SELECT
-       (SELECT COUNT(*) FROM products)                                AS products,
-       (SELECT COUNT(*) FROM modules)                                 AS modules,
+       (SELECT COUNT(*) FROM products WHERE kind = 'module')          AS products,
+       (SELECT COUNT(*) FROM modules sm JOIN products sp ON sp.id = sm.product_id
+         WHERE sp.kind = 'module')                                    AS modules,
+       (SELECT COUNT(*) FROM modules sm JOIN products sp ON sp.id = sm.product_id
+         WHERE sp.kind = 'antenna')                                   AS antennas,
        COUNT(*)                                                       AS units,
        CAST(COALESCE(SUM(status = 'in_stock'), 0)  AS SIGNED)         AS in_stock,
        CAST(COALESCE(SUM(status = 'sold'), 0)      AS SIGNED)         AS sold,
@@ -46,6 +53,7 @@ export async function getStats(): Promise<Stats> {
   const t = totalsRows[0] as {
     products: number;
     modules: number;
+    antennas: number;
     units: number;
     in_stock: number;
     sold: number;
@@ -54,7 +62,7 @@ export async function getStats(): Promise<Stats> {
   };
 
   const [lowRows] = await pool.query<RowDataPacket[]>(
-    `SELECT m.id, m.name, m.sku, p.name AS product_name,
+    `SELECT m.id, m.name, m.sku, p.name AS product_name, p.kind,
             CAST(COALESCE(SUM(u.status = 'in_stock'), 0) AS SIGNED) AS in_stock
      FROM modules m
      JOIN products p ON p.id = m.product_id
@@ -67,6 +75,7 @@ export async function getStats(): Promise<Stats> {
   );
   const low = lowRows as Array<{
     id: string;
+    kind: "module" | "antenna";
     name: string;
     sku: string;
     product_name: string;
@@ -77,6 +86,7 @@ export async function getStats(): Promise<Stats> {
     totals: {
       products: t.products,
       modules: t.modules,
+      antennas: t.antennas,
       units: t.units,
       inStock: t.in_stock,
       sold: t.sold,
@@ -86,6 +96,7 @@ export async function getStats(): Promise<Stats> {
     lowStockThreshold: settings.lowStockThreshold,
     lowStock: low.map((r) => ({
       id: r.id,
+      kind: r.kind,
       name: r.name,
       sku: r.sku,
       productName: r.product_name,

@@ -7,9 +7,18 @@ export const UNIT_STATUSES: readonly UnitStatus[] = [
   "defective",
 ] as const;
 
-/** A product: the top-level grouping that several modules belong to. */
+/**
+ * What a product's items are. Antennas are stocked and given exactly like
+ * modules (serials, warranty, resources) but are kept apart in the app.
+ */
+export type ProductKind = "module" | "antenna";
+
+export const PRODUCT_KINDS: readonly ProductKind[] = ["module", "antenna"] as const;
+
+/** A product: the top-level grouping that several modules (or antennas) belong to. */
 export interface Product {
   id: string;
+  kind: ProductKind;
   name: string;
   description: string;
   createdAt: string;
@@ -23,11 +32,16 @@ export interface ProductWithCounts extends Product {
   inStock: number;
 }
 
-/** A module: the stocked item. Units (stock) belong to a module. */
+/**
+ * A module: the stocked item. Units (stock) belong to a module. An antenna
+ * model is a module of an antenna product (`kind`).
+ */
 export interface Module {
   id: string;
   productId: string;
   productName: string;
+  /** Its product's kind. */
+  kind: ProductKind;
   name: string;
   sku: string;
   description: string;
@@ -68,6 +82,7 @@ export interface UnitView extends Unit {
   sku: string;
   productId: string;
   productName: string;
+  kind: ProductKind;
 }
 
 /** One module given in a hand-over. */
@@ -78,12 +93,28 @@ export interface DispatchItem {
   sku: string;
   productId: string;
   productName: string;
+  kind: ProductKind;
   quantity: number;
+}
+
+/**
+ * A tag category: what kind of quantity-only item a tag is ("Tag", "RS232
+ * Cable"…). Admins manage the list.
+ */
+export interface TagCategory {
+  id: string;
+  name: string;
+  /** Tags in this category. */
+  tagCount: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 /** A tag: stock counted by quantity only — no serials, no warranty. */
 export interface Tag {
   id: string;
+  categoryId: string;
+  categoryName: string;
   name: string;
   description: string;
   inStock: number;
@@ -163,6 +194,8 @@ export interface DispatchTag {
   id: string;
   tagId: string;
   tagName: string;
+  categoryId: string;
+  categoryName: string;
   quantity: number;
 }
 
@@ -190,9 +223,20 @@ export interface Dispatch {
   createdAt: string;
 }
 
-/** A dispatch plus the units that went out with it. */
+/** How much of a resource the units of one hand-over line were built with. */
+export interface DispatchResource {
+  moduleId: string;
+  resourceId: string;
+  resourceName: string;
+  /** Units of the line that used it. */
+  units: number;
+  quantity: number;
+}
+
+/** A dispatch plus the units that went out with it and the resources in them. */
 export interface DispatchDetail extends Dispatch {
   units: UnitView[];
+  resources: DispatchResource[];
 }
 
 export interface Settings {
